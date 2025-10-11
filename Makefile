@@ -41,6 +41,8 @@ OBJECTS = \
     progress.o \
     queue.o \
     utils.o \
+    signature.o \
+    sig_table.o \
 
 .PHONY: \
     all install uninstall clean check dist distcheck \
