@@ -28,10 +28,13 @@ CFLAGS += \
     -fno-omit-frame-pointer \
     -mtune=generic \
     -O \
+    -I/opt/homebrew/Cellar/xxhash/0.8.3/include \
     '-DVERSION="$(VERSION)"' \
-    '-DBUILD_DATE="$(shell date '+%Y%m%d')"'
+    '-DBUILD_DATE="$(shell date '+%Y%m%d')"' 
 
 ENTITLEMENT_FLAGS =
+
+LIBS = -L/opt/homebrew/Cellar/xxhash/0.8.3/lib -lxxhash
 
 OBJECTS = \
     dedup.o \
@@ -44,6 +47,7 @@ OBJECTS = \
     signature.o \
     sig_table.o \
     output_format.o \
+    dedup_fast.o \
 
 .PHONY: \
     all install uninstall clean check dist distcheck \
@@ -52,10 +56,10 @@ OBJECTS = \
     leaks-build \
     clean-coverage report-coverage \
     universal-dedup universal-dist \
-	compiledb tidy \
+    compiledb tidy \
     list mkdirs
 
-all: dedup
+all: dedup dedup-fast
 
 %.o: %.c %.h
 	rm -f $(basename $<).gcda $(basename $<).gcno
@@ -64,8 +68,14 @@ all: dedup
 dedup.arm: CFLAGS += -target arm64-apple-macos11
 dedup.x86_64: CFLAGS += -target x86_64-apple-macos11
 
-dedup dedup.arm dedup.x86_64: $(OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $^
+dedup dedup.arm dedup.x86_64: $(filter-out dedup_fast.o, $(OBJECTS))
+	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
+	mv $@ $@.unsigned
+	codesign -s - -v -f $(ENTITLEMENT_FLAGS) $@.unsigned
+	mv $@.unsigned $@
+
+dedup-fast dedup-fast.arm dedup-fast.x86_64: dedup_fast.o alist.o clone.o map.o progress.o queue.o utils.o signature.o sig_table.o output_format.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
 	mv $@ $@.unsigned
 	codesign -s - -v -f $(ENTITLEMENT_FLAGS) $@.unsigned
 	mv $@.unsigned $@
@@ -111,6 +121,7 @@ clean: clean-coverage
 	rm -rf *.dSYM/
 	rm -f *.tidy
 	rm -f dedup dedup.arm dedup.x86_64 dedup.universal
+	rm -f dedup-fast dedup-fast.arm dedup-fast.x86_64
 	cd test && make clean
 	rm -rf build
 
