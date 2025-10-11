@@ -43,6 +43,7 @@ OBJECTS = \
     utils.o \
     signature.o \
     sig_table.o \
+    output_format.o \
 
 .PHONY: \
     all install uninstall clean check dist distcheck \
