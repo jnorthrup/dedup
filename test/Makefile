@@ -1,5 +1,5 @@
 CFLAGS += \
-    -I/opt/local/include \
+    -I/opt/homebrew/include \
 	-std=c2x \
     -Wall -Wextra -Werror -pedantic \
     -Wpointer-arith \
@@ -24,7 +24,7 @@ CFLAGS += \
     -Og
 
 LDFLAGS += \
-    -L/opt/local/lib
+    -L/opt/homebrew/lib
 
 .PHONY: \
 	check \

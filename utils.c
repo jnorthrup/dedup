@@ -101,6 +101,14 @@ size_t private_size(const char* restrict path) {
     return size_attr.size;
 }
 
+ino_t get_inode(const char* restrict path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return 0;
+    }
+    return st.st_ino;
+}
+
 FileMetadata* metadata_from_entry(FileEntry* fe) {
     FileMetadata fm = {
         //

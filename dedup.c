@@ -30,13 +30,15 @@ __used static char const copyright[] =
     "@(#) Copyright © 2023\n"
         "TTKB, LLC. All rights reserved.\n";
 #ifndef VERSION
-#define VERSION "0.0.0"
+#define VERSION 0.0.0
 #endif // VERSION
 #ifndef BUILD_DATE
-#define BUILD_DATE "00000000"
+#define BUILD_DATE 00000000
 #endif // BUILD_DATE
+#define STR(x) #x
+#define XSTR(x) STR(x)
 __used static char const version[] =
-    "TTKB dedup " VERSION " (" BUILD_DATE ")";
+    "TTKB dedup " XSTR(VERSION) " (" XSTR(BUILD_DATE) ")";
 #if 0
 static char sccsid[] = "@(#)dedup.c)";
 #endif // 0
@@ -60,6 +62,9 @@ static char sccsid[] = "@(#)dedup.c)";
 #include "map.h"
 #include "progress.h"
 #include "queue.h"
+#include "output_format.h"
+#include "signature.h"
+#include "sig_table.h"
 #include "utils.h"
 
 #define PROGRESS_LOCK(p, m, block) do { \
@@ -79,8 +84,7 @@ typedef enum ReplaceMode {
 typedef struct DedupContext {
     Progress* progress;
     FileEntryHead* queue;
-    rb_tree_t* visited;
-    rb_tree_t* duplicates;
+    SigTable* signatures;
     size_t found;
     size_t saved;
     size_t already_saved;
@@ -90,77 +94,211 @@ typedef struct DedupContext {
     uint8_t verbosity;
     bool force;
     ReplaceMode replace_mode;
+    OutputFormat output_format;
     pthread_mutex_t metrics_mutex;
     pthread_mutex_t progress_mutex;
     pthread_mutex_t queue_mutex;
-    pthread_mutex_t visited_mutex;
-    pthread_mutex_t duplicates_mutex;
+    pthread_mutex_t signatures_mutex;
     pthread_mutex_t done_mutex;
 } DedupContext;
 
 
 void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
+    if (!fe || !ctx) {
+        return;
+    }
 
-    FileMetadata* fm = metadata_from_entry(fe);
+    static int __visit_debug_count = 0;
+    if (__visit_debug_count < 20) {
+        fprintf(stderr, "[debug] visit_entry start path=%s size=%zu\n", fe->path, fe->size);
+    }
+    __visit_debug_count++;
 
-    if (!fm) {
+    // Compute signature for this file
+    if (__visit_debug_count < 20) {
+        fprintf(stderr, "[debug] computing signature for %s\n", fe->path);
+    }
+    FileSignature* sig = compute_signature(fe->path, fe->device, fe->size);
+    if (__visit_debug_count < 20) {
+        if (sig) fprintf(stderr, "[debug] compute_signature succeeded for %s\n", fe->path);
+        else fprintf(stderr, "[debug] compute_signature failed for %s\n", fe->path);
+    }
+    if (!sig) {
         PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
             clear_progress();
-            fprintf(stderr,
-                    "could not populate metadata for %s\n",
-                    fe->path);
-            perror("metadata_from_entry");
+            fprintf(stderr, "could not compute signature for %s\n", fe->path);
+            perror("compute_signature");
         });
         return;
     }
 
-    pthread_mutex_lock(&ctx->visited_mutex);
-    FileMetadata* old = visited_tree_insert(ctx->visited, fm);
-    old = metadata_dup(old);
-    pthread_mutex_unlock(&ctx->visited_mutex);
+    // Insert into signature table and check for duplicates
+    if (!ctx->signatures) {
+        PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+            clear_progress();
+            fprintf(stderr, "signature table not initialized for %s\n", fe->path);
+        });
+        free_signature(sig);
+        return;
+    }
 
-    if (old) {
-        pthread_mutex_lock(&ctx->duplicates_mutex);
-        AList* list = duplicate_tree_find(ctx->duplicates, fm);
-        if (alist_empty(list)) {
-            alist_add(list, metadata_dup(old));
-        }
+    pthread_mutex_lock(&ctx->signatures_mutex);
+    size_t table_size_before = sig_table_size(ctx->signatures);
+    SigTableEntry* existing = sig_table_insert(ctx->signatures, sig, fe->path, get_clone_id(fe->path));
+    size_t table_size_after = sig_table_size(ctx->signatures);
+    pthread_mutex_unlock(&ctx->signatures_mutex);
 
-        if (ctx->verbosity) {
+    // Safety check: table size should only increase by 0 or 1
+    if (table_size_after > table_size_before + 1) {
+        PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+            clear_progress();
+            fprintf(stderr, "warning: signature table size increased by %zu (expected 0 or 1)\n",
+                    table_size_after - table_size_before);
+        });
+    }
+
+    bool table_took_ownership = (table_size_after > table_size_before);
+
+    if (existing) {
+        // Found a duplicate - deduplicate immediately
+        if (ctx->verbosity > 1) {
             PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
                 clear_progress();
-                printf("%s has %zu duplicates\n",
-                       fm->path,
-                       alist_size(list));
-                for (size_t i = 0; i < alist_size(list); i++) {
-                    printf("\t%s\n",
-                           ((FileMetadata*) alist_get(list, i))->path);
-                }
+                printf("'%s' duplicates '%s' (%zu bytes)\n",
+                       fe->path, existing->path, fe->size);
             });
         }
 
-        // ownership transferred to the list
-        alist_add(list, fm);
-        pthread_mutex_unlock(&ctx->duplicates_mutex);
-
-        if (fm->clone_id != old->clone_id) {
+        // Check if already deduplicated
+        uint64_t current_clone_id = get_clone_id(fe->path);
+        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id == existing->clone_id) ||
+            (ctx->replace_mode == DEDUP_LINK && fe->inode == get_inode(existing->path))) {
             pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->already_saved += fe->size;
+            pthread_mutex_unlock(&ctx->metrics_mutex);
+            free_signature(sig);
+            return;
+        }
+
+        // Skip if hardlinked and not forcing
+        if (!ctx->force && fe->nlink > 1) {
+            if (ctx->verbosity) {
+                PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                    clear_progress();
+                    printf("skipping %s, hardlinked\n", fe->path);
+                });
+            }
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->already_saved += fe->size;
+            pthread_mutex_unlock(&ctx->metrics_mutex);
+            free_signature(sig);
+            return;
+        }
+
+        // Skip if immutable
+        if (fe->flags & UF_IMMUTABLE || fe->flags & SF_IMMUTABLE) {
+            if (ctx->verbosity) {
+                PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                    clear_progress();
+                    printf("skipping %s, immutable\n", fe->path);
+                });
+            }
+            free_signature(sig);
+            return;
+        }
+
+        // Perform deduplication
+        if (ctx->dry_run) {
+            if (ctx->verbosity) {
+                PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                    clear_progress();
+                    printf("would deduplicate %s to %s\n", fe->path, existing->path);
+                });
+            }
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->saved += fe->size;
             ctx->found++;
             pthread_mutex_unlock(&ctx->metrics_mutex);
+        } else {
+            int result = 0;
+            switch (ctx->replace_mode) {
+            case DEDUP_CLONE:
+                result = replace_with_clone(existing->path, fe->path);
+                break;
+            case DEDUP_LINK:
+                result = replace_with_link(existing->path, fe->path);
+                break;
+            case DEDUP_SYMLINK:
+                result = replace_with_symlink(existing->path, fe->path);
+                break;
+            }
+
+            if (result) {
+                PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                    clear_progress();
+                    fprintf(stderr, "failed to deduplicate %s\n", fe->path);
+                    perror("deduplication failed");
+                });
+            } else {
+                if (ctx->verbosity) {
+                    PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                        clear_progress();
+                        printf("deduplicated %s\n", fe->path);
+                    });
+                }
+
+                // Verify clone worked if using clone mode
+                if (ctx->replace_mode == DEDUP_CLONE) {
+                    uint64_t new_clone_id = get_clone_id(fe->path);
+                    if (new_clone_id != existing->clone_id) {
+                        if (private_size(fe->path) == 0) {
+                            // Clone worked but clone_id not updated
+                            PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                                clear_progress();
+                                fprintf(stderr, "clone succeeded but clone_id mismatch for %s\n", fe->path);
+                            });
+                        } else {
+                            PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                                clear_progress();
+                                fprintf(stderr, "clone failed silently for %s\n", fe->path);
+                            });
+                            result = -1; // Mark as failed
+                        }
+                    }
+                }
+
+                if (result == 0) {
+                    pthread_mutex_lock(&ctx->metrics_mutex);
+                    ctx->saved += fe->size;
+                    ctx->found++;
+                    pthread_mutex_unlock(&ctx->metrics_mutex);
+                } else {
+                    pthread_mutex_lock(&ctx->metrics_mutex);
+                    ctx->already_saved += fe->size; // Count as already saved to avoid double counting
+                    pthread_mutex_unlock(&ctx->metrics_mutex);
+                }
+            }
+        }
+
+        free_signature(sig);
+    } else {
+        // First instance of this signature
+        if (table_took_ownership) {
+            // Signature was stored in table - no deduplication needed
             if (ctx->verbosity > 1) {
                 PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
                     clear_progress();
-                    printf("'%s' is duplicated by '%s' (%zu bytes) [found: %zu]\n",
-                           old->path,
-                           fm->path,
-                           fm->size,
-                           ctx->found);
+                    printf("first instance: %s (%zu bytes)\n", fe->path, fe->size);
                 });
             }
+        } else {
+            // Table failed to take ownership (allocation failure)
+            PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
+                clear_progress();
+                fprintf(stderr, "failed to store signature for %s: memory allocation failed\n", fe->path);
+            });
+            free_signature(sig);
         }
-        free_metadata(old);
-    } else {
-        free_metadata(fm);
     }
 }
 
@@ -382,6 +520,7 @@ static void usage(char* pgm, DedupContext* ctx) {
                 "  --dry-run, -n            Don't replace file content, just print what \n"
                 "                           would have happend.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
+                "  --format, -F format      Output format for byte sizes. See --help formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
                 "                           than the starting paths.\n"
                 "  --link, -l               Use hardlinks instead of clones.\n"
@@ -464,30 +603,6 @@ bool are_acls_supported(char* path) {
     return is_vol_cap_supported(path, VOL_CAP_INT_RENAME_SWAP);
 }
 
-void print_human_bytes(uint64_t bytes) {
-    double v = bytes;
-    char* unit = " bytes";
-
-    if (v > 1000.0) {
-        v /= 1000.0;
-        unit = "kB";
-    }
-    if (v > 1000.0) {
-        v /= 1000.0;
-        unit = "MB";
-    }
-    if (v > 1000.0) {
-        v /= 1000.0;
-        unit = "GB";
-    }
-    if (v > 1000.0) {
-        v /= 1000.0;
-        unit = "TB";
-    }
-
-    printf("%0.f%s", v, unit);
-}
-
 int main(int argc, char* argv[]) {
 
     FileEntryHead* queue = new_file_entry_queue();
@@ -498,8 +613,7 @@ int main(int argc, char* argv[]) {
     DedupContext dc = {
         .progress = &p,
         .queue = queue,
-        .visited = new_visited_tree(),
-        .duplicates = new_duplicate_tree(),
+        .signatures = new_sig_table(65536),  // 64K buckets - reasonable size for most workloads
         .found = 0,
         .saved = 0,
         .already_saved = 0,
@@ -508,14 +622,20 @@ int main(int argc, char* argv[]) {
         .verbosity = 0,
         .force = 0,
         .replace_mode = DEDUP_CLONE,
+        .output_format = OUTPUT_SI_HUMAN,
         .thread_count = cpu_count(),
         .metrics_mutex = PTHREAD_MUTEX_INITIALIZER,
         .progress_mutex = PTHREAD_MUTEX_INITIALIZER,
         .queue_mutex = PTHREAD_MUTEX_INITIALIZER,
-        .visited_mutex = PTHREAD_MUTEX_INITIALIZER,
-        .duplicates_mutex = PTHREAD_MUTEX_INITIALIZER,
+        .signatures_mutex = PTHREAD_MUTEX_INITIALIZER,
         .done_mutex = PTHREAD_MUTEX_INITIALIZER,
     };
+
+    // Validate signature table was created successfully
+    if (!dc.signatures) {
+        fprintf(stderr, "failed to create signature table\n");
+        return 1;
+    }
 
     static const struct option options[] = {
         { "ignore",          required_argument, NULL, 'I' },
@@ -523,6 +643,7 @@ int main(int argc, char* argv[]) {
         { "version",         no_argument,       NULL, 'V' },
         { "color",           optional_argument, NULL, 'c' },
         { "depth",           required_argument, NULL, 'd' },
+        { "format",          required_argument, NULL, 'F' },
         { "link",            no_argument,       NULL, 'l' },
         { "dry-run",         no_argument,       NULL, 'n' },
         { "symlink",         no_argument,       NULL, 's' },
@@ -538,7 +659,7 @@ int main(int argc, char* argv[]) {
 
     int ch = -1, t;
     short d;
-    while ((ch = getopt_long(argc, argv, "I:PVc::d:fhlnst:vx?", options, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "I:PVc::d:F:hlnst:vx?", options, NULL)) != -1) {
         switch (ch) {
             case 'I':
                 fprintf(stderr, "-I is unimplemented\n");
@@ -560,6 +681,9 @@ int main(int argc, char* argv[]) {
                     usage(argv[0], &dc);
                 }
                 max_depth = d;
+                break;
+            case 'F':
+                dc.output_format = parse_output_format(optarg);
                 break;
             case 'h':
                 human_readable = true;
@@ -631,6 +755,8 @@ int main(int argc, char* argv[]) {
         perror("Could not open starting directories");
         return 1;
     }
+    /* Debug: note fts_open succeeded and start traversal */
+    fprintf(stderr, "[debug] fts_open succeeded\n");
     // LCOV_EXCL_STOP
 
     pthread_t* threads = calloc(dc.thread_count, sizeof(pthread_t));
@@ -647,7 +773,14 @@ int main(int argc, char* argv[]) {
     dev_t current_dev = -1;
     bool clonefile_supported = false;
     FTSENT* entry = NULL;
+    int __debug_fts_count = 0;
     while ((entry = fts_read(traversal)) != NULL) {
+        if (__debug_fts_count < 5) {
+            fprintf(stderr, "[debug] fts_read loop iteration=%d path=%s\n",
+                    __debug_fts_count,
+                    entry ? entry->fts_path : "(null)");
+        }
+        __debug_fts_count++;
         if (entry->fts_errno) {
             char* e = strerror(entry->fts_errno);
             PROGRESS_LOCK(dc.progress, &dc.progress_mutex, {
@@ -716,6 +849,17 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // skip .padding files (browser cache files that are often locked)
+        const char* basename = strrchr(entry->fts_path, '/');
+        if (basename && strcmp(basename + 1, ".padding") == 0) {
+            continue;
+        }
+
+        // skip cloud storage mounts (GoogleDrive, Dropbox, iCloud, OneDrive)
+        if (strstr(entry->fts_path, "/Library/CloudStorage/")) {
+            continue;
+        }
+
         // at this point we have a regular file
         // that only has one link
         PROGRESS_LOCK(dc.progress, &dc.progress_mutex, {
@@ -759,21 +903,19 @@ int main(int argc, char* argv[]) {
     free(threads); threads = NULL;
 
     free_file_entry_queue(queue); queue = NULL;
-    free_visited_tree(dc.visited); dc.visited = NULL;
+    free_sig_table(dc.signatures); dc.signatures = NULL;
 
     if (dc.progress) {
         clear_progress();
     }
     printf("duplicates found: %zu\n", dc.found);
 
-    SHA256ListNode* duplicate_set = NULL;
-    RB_TREE_FOREACH(duplicate_set, dc.duplicates) {
-        deduplicate(duplicate_set->list, &dc);
-    }
+    // Fast dedup processes files immediately during traversal
+    // No additional deduplication step needed
 
     printf("bytes saved: ");
     if (human_readable) {
-        print_human_bytes(dc.saved);
+        printf("%s", format_bytes(dc.saved, dc.output_format));
     } else {
         printf("%zu", dc.saved);
     }
@@ -781,12 +923,11 @@ int main(int argc, char* argv[]) {
 
     printf("already saved: ");
     if (human_readable) {
-        print_human_bytes(dc.already_saved);
+        printf("%s", format_bytes(dc.already_saved, dc.output_format));
     } else {
         printf("%zu", dc.already_saved);
     }
     putchar('\n');
 
-    free_duplicate_tree(dc.duplicates); dc.duplicates = NULL;
     return 0;
 }

@@ -57,15 +57,13 @@ OBJECTS = \
 
 all: dedup
 
-%.o: %.c %.h
-	rm -f $(basename $<).gcda $(basename $<).gcno
-	$(CC) $(CFLAGS) -v -c -o $@ $<
+dedup.o: CFLAGS += -I/opt/homebrew/include
 
-dedup.arm: CFLAGS += -target arm64-apple-macos11
-dedup.x86_64: CFLAGS += -target x86_64-apple-macos11
+dedup.arm: CFLAGS += -target arm64-apple-macos11 -I/opt/homebrew/include
+dedup.x86_64: CFLAGS += -target x86_64-apple-macos11 -I/opt/homebrew/include
 
 dedup dedup.arm dedup.x86_64: $(OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ -L/opt/homebrew/lib -lxxhash
 	mv $@ $@.unsigned
 	codesign -s - -v -f $(ENTITLEMENT_FLAGS) $@.unsigned
 	mv $@.unsigned $@

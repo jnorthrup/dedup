@@ -30,8 +30,10 @@ SigTable* new_sig_table(size_t bucket_count);
 void free_sig_table(SigTable* table);
 
 // Insert or find matching signature
-// Returns NULL if no match found (new entry inserted)
-// Returns existing entry if match found
+// Returns:
+//   - Pointer to existing entry if match found (caller still owns sig)
+//   - NULL if successfully inserted new entry (table owns sig)
+//   - NULL if insertion failed (caller still owns sig, check table size)
 SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char* path, uint64_t clone_id);
 
 // Get statistics
