@@ -36,6 +36,9 @@ void free_sig_table(SigTable* table);
 //   - NULL if insertion failed (caller still owns sig, check table size)
 SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char* path, uint64_t clone_id);
 
+// Check if clone_id already seen
+bool sig_table_has_clone_id(const SigTable* table, uint64_t clone_id);
+
 // Get statistics
 size_t sig_table_size(const SigTable* table);
 size_t sig_table_collisions(const SigTable* table);

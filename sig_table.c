@@ -79,6 +79,24 @@ SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char*
     return NULL;  // No match found
 }
 
+bool sig_table_has_clone_id(const SigTable* table, uint64_t clone_id) {
+    if (!table || clone_id == 0) {
+        return false;
+    }
+
+    for (size_t i = 0; i < table->bucket_count; i++) {
+        SigTableEntry* entry = table->buckets[i];
+        while (entry) {
+            if (entry->clone_id == clone_id) {
+                return true;
+            }
+            entry = entry->next;
+        }
+    }
+
+    return false;
+}
+
 size_t sig_table_size(const SigTable* table) {
     return table ? table->entry_count : 0;
 }
