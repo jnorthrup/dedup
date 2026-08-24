@@ -287,38 +287,39 @@ const char* get_format_description(OutputFormat format) {
 // Examples: "   0", " 999", "1.0K", " 99K", "999K", "1.0M", " 99M", "999M", "1.0G", etc.
 void format_compact(uint64_t value, char buf[5]) {
     buf[4] = '\0';
+    int len;
     
     if (value < 1000) {
-        snprintf(buf, 5, "%4llu", (unsigned long long)value);
+        len = snprintf(buf, 5, "%4llu", (unsigned long long)value);
     } else if (value < 9950) {
-        snprintf(buf, 5, "%.1fK", (double)value / 1000.0);
+        len = snprintf(buf, 5, "%.1fK", (double)value / 1000.0);
     } else if (value < 999500) {
-        snprintf(buf, 5, "%3lluK", (unsigned long long)((value + 500) / 1000));
+        len = snprintf(buf, 5, "%3lluK", (unsigned long long)((value + 500) / 1000));
     } else if (value < 9950000) {
-        snprintf(buf, 5, "%.1fM", (double)value / 1000000.0);
+        len = snprintf(buf, 5, "%.1fM", (double)value / 1000000.0);
     } else if (value < 999500000) {
-        snprintf(buf, 5, "%3lluM", (unsigned long long)((value + 500000) / 1000000));
+        len = snprintf(buf, 5, "%3lluM", (unsigned long long)((value + 500000) / 1000000));
     } else if (value < 9950000000ULL) {
-        snprintf(buf, 5, "%.1fG", (double)value / 1000000000.0);
+        len = snprintf(buf, 5, "%.1fG", (double)value / 1000000000.0);
     } else if (value < 999500000000ULL) {
-        snprintf(buf, 5, "%3lluG", (unsigned long long)((value + 500000000) / 1000000000));
+        len = snprintf(buf, 5, "%3lluG", (unsigned long long)((value + 500000000) / 1000000000));
     } else if (value < 9950000000000ULL) {
-        snprintf(buf, 5, "%.1fT", (double)value / 1000000000000.0);
+        len = snprintf(buf, 5, "%.1fT", (double)value / 1000000000000.0);
     } else if (value < 999500000000000ULL) {
-        snprintf(buf, 5, "%3lluT", (unsigned long long)((value + 500000000000ULL) / 1000000000000ULL));
+        len = snprintf(buf, 5, "%3lluT", (unsigned long long)((value + 500000000000ULL) / 1000000000000ULL));
     } else if (value < 9950000000000000ULL) {
-        snprintf(buf, 5, "%.1fP", (double)value / 1000000000000000ULL);
+        len = snprintf(buf, 5, "%.1fP", (double)value / 1000000000000000ULL);
     } else {
-        snprintf(buf, 5, "999P");
+        len = snprintf(buf, 5, "999P");
     }
     
-    size_t len = strlen(buf);
+    if (len < 0) len = 0;
+    if (len > 4) len = 4;
+
     if (len < 4) {
         size_t pad = 4 - len;
         memmove(buf + pad, buf, len + 1);
         for (size_t i = 0; i < pad; i++) buf[i] = ' ';
-    } else if (len > 4) {
-        buf[4] = '\0';
     }
 }
 
