@@ -26,7 +26,7 @@
 
 #include <sys/cdefs.h>
 #ifndef lint
-__used static char const copyright[] =
+__attribute__((used)) static char const copyright[] =
     "@(#) Copyright © 2023\n"
         "TTKB, LLC. All rights reserved.\n";
 #ifndef VERSION
@@ -37,7 +37,7 @@ __used static char const copyright[] =
 #endif // BUILD_DATE
 #define STR(x) #x
 #define XSTR(x) STR(x)
-__used static char const version[] =
+__attribute__((used)) static char const version[] =
     "TTKB dedup " XSTR(VERSION) " (" XSTR(BUILD_DATE) ")";
 #if 0
 static char sccsid[] = "@(#)dedup.c)";
@@ -107,7 +107,6 @@ static void clone_summary_write(const char* origin, const char* clone, size_t si
         fprintf(clone_summary_stream, "  Origin: %s\n", origin);
         fprintf(clone_summary_stream, "    Clone: %s (size: %zu bytes)\n", clone, size);
         clone_summary_count++;
-        fflush(clone_summary_stream);
     }
     pthread_mutex_unlock(&clone_summary_mutex);
 }
