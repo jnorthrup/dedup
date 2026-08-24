@@ -50,6 +50,7 @@ static char sccsid[] = "@(#)dedup.c)";
 #include <sys/ioctl.h>
 
 #include <assert.h>
+#include <stdlib.h>
 #include <err.h>
 #include <fts.h>
 #include <getopt.h>
@@ -887,8 +888,7 @@ bool is_vol_cap_supported(char* path, int vol_cap) {
 
     if (result) {
         perror("Could not get volume stat");
-        // TODO: exit?
-        return false;
+        exit(1);
     }
 
     // get the supported capabilities and attributes
@@ -899,8 +899,7 @@ bool is_vol_cap_supported(char* path, int vol_cap) {
                          FSOPT_ATTR_CMN_EXTENDED);
     if (result) {
         perror("Could not retrieve volume attributes");
-        // TODO: exit?
-        return false;
+        exit(1);
     }
 
      #define VOL_CAPABILITIES_FORMAT     0
