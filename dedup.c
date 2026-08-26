@@ -530,12 +530,14 @@ static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clone
     }
 
     if (!pruned) {
+#if defined(__APPLE__)
         uint64_t clone_id = get_clone_id(fe->path);
         if (clone_id != 0) {
             if (seen_set_insert(seen_clones, clone_id)) {
                 pruned = true;
             }
         }
+#endif
     }
 
     if (!pruned) {
