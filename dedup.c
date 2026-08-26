@@ -68,6 +68,7 @@ static char sccsid[] = "@(#)dedup.c)";
 #include "queue.h"
 #include "output_format.h"
 #include "runtime_dispatch.h"
+#include "runtime_caps.h"
 #include "seen_set.h"
 #include "signature.h"
 #include "sig_table.h"
