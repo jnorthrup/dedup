@@ -24,7 +24,6 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
-#include <sys/attr.h>
 #if defined(__APPLE__)
 #include <sys/clonefile.h>
 #include <copyfile.h>

@@ -46,6 +46,7 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/attr.h>
 #include <sys/sysctl.h>
 #include <sys/ioctl.h>
 

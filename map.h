@@ -27,7 +27,6 @@
 #ifndef __DEDUP_MAP_H__
 #define __DEDUP_MAP_H__
 
-#include <sys/attr.h>
 #include <sys/rbtree.h>
 #include <sys/stat.h>
 #include <stdbool.h>

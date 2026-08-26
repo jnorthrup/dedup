@@ -27,7 +27,7 @@
 #ifndef __DEDUP_QUEUE_H__
 #define __DEDUP_QUEUE_H__
 
-#include <sys/attr.h>
+#include <sys/types.h>
 #include <sys/queue.h>
 #include <stdbool.h>
 
