@@ -877,6 +877,7 @@ int32_t cpu_count() {
     return c;
 }
 
+#if defined(__APPLE__)
 __attribute__((const))
 bool is_vol_cap_supported(char* path, int vol_cap) {
     struct VolAttrsBuf {
@@ -917,16 +918,29 @@ bool is_vol_cap_supported(char* path, int vol_cap) {
 
     return vol_attrs.capabilities.capabilities[VOL_CAPABILITIES_INTERFACES] & vol_cap;
 }
+#endif /* __APPLE__ */
 
 __attribute__((const))
 bool is_clonefile_supported(char* path) {
+#if defined(__APPLE__)
     return is_vol_cap_supported(path, VOL_CAP_INT_CLONE);
+#else
+    /* TODO: probe active backend (FICLONE/UBT) once Task 5 lands */
+    (void)path;
+    return false;
+#endif
 }
 
 __attribute__((unused))
 __attribute__((const))
 bool are_acls_supported(char* path) {
+#if defined(__APPLE__)
     return is_vol_cap_supported(path, VOL_CAP_INT_RENAME_SWAP);
+#else
+    /* rename_swap is universal on Linux */
+    (void)path;
+    return true;
+#endif
 }
 
 int main(int argc, char* argv[]) {
