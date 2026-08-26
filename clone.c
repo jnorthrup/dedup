@@ -305,17 +305,32 @@ char* path_relative_to(const char* src, const char* dst) {
 
 int replace_with_symlink(const char* src, const char* dst) {
     char* path = path_relative_to(dst, src);
+    if (!path) return EINVAL;
 
-    // TODO: should this atomically move a tmp file instead of
-    //       two step an unlink and link?
-    if (unlink(dst)) {
+    // Stage: create a temporary symlink, then atomic rename(2) swap.
+    // At any point during this sequence, dst is either the original
+    // file or a valid symlink — never missing.
+    char tmp[PATH_MAX];
+    if (!tmp_name(dst, tmp, PATH_MAX)) {
         free(path);
-        warn("%s", dst);
-        return 1;
+        return errno;
     }
-    int r = symlink(path, dst);
+
+    int r = symlink(path, tmp);
+    if (r) {
+        int e = errno;
+        free(path);
+        return e;
+    }
+
+    r = rename(tmp, dst);
+    if (r) {
+        int e = errno;
+        unlink(tmp);
+        free(path);
+        return e;
+    }
 
     free(path);
-
-    return r;
+    return 0;
 }
