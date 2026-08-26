@@ -5,7 +5,7 @@ CFLAGS += -std=gnu2x -Wall -Wextra -Werror -pedantic \
           -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
 AR ?= ar
 
-SRCS = image.c super.c
+SRCS = image.c super.c extent.c clone.c
 OBJS = $(SRCS:.c=.o)
 LIB = libubt.a
 
