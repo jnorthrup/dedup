@@ -352,8 +352,25 @@ selects no lines).
 ## Are Any Others Operating Systems Supported?
 
 `dedup` leverages both file system support for creating clones as well as the
-appropriate system calls. [OpenZFS support for sharing blocks](https://github.com/openzfs/zfs/pull/13392)
-may make FreeBSD support possible in the future.
+appropriate system calls.
+
+### Linux
+
+Linux is supported with `--symlink` and `--link` modes. Clone mode (`-C`)
+requires a filesystem supporting `FICLONE` (btrfs, xfs with reflink).
+The active clone backend is auto-detected at startup and can be overridden with
+the `DEDUP_BACKEND` environment variable:
+
+- `clonefile` — macOS `clonefile(2)` (default on macOS)
+- `ficlone` — Linux `FICLONE` ioctl (auto-detected on Linux)
+- `ubt` — userspace BTRFS backend (future)
+- `auto` — probe the system and pick the best available
+
+### FreeBSD
+
+[OpenZFS support for sharing blocks](https://github.com/openzfs/zfs/pull/13392)
+may make FreeBSD support possible in the future. The FreeBSD `CF_FICLONE` path
+exists but is untested.
 
 ## Why Aren't HFS Compressed Files Cloned?
 

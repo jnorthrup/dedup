@@ -40,3 +40,17 @@ sysctl
 tmp
 xattr
 xattrs
+btrfs
+FICLONE
+ficlone
+ubt
+Deduplication
+SHA
+backend
+deduplication
+filesystem
+reflink
+userspace
+vectorized
+xfs
+xxHash

@@ -51,7 +51,7 @@ OBJECTS = \
 
 .PHONY: \
     all install uninstall clean check dist distcheck \
-    check-build check-test \
+    check-build check-test check-linux \
     check-spelling check-spelling-man check-spelling-readme \
     leaks-build \
     clean-coverage report-coverage \
@@ -102,6 +102,9 @@ check-build: leaks-build
 check-test: check-build
 	cd test && make check
 check: check-test tidy check-spelling
+
+check-linux:
+	cd test && $(MAKE) check-linux
 
 clean-coverage:
 	find . -type f -name '*.gcda' -delete
