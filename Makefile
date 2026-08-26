@@ -36,6 +36,7 @@ ENTITLEMENT_FLAGS =
 OBJECTS = \
     dedup.o \
     alist.o \
+    backend.o \
     clone.o \
     map.o \
     progress.o \

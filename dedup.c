@@ -64,6 +64,7 @@ static char sccsid[] = "@(#)dedup.c)";
 #include <unistd.h>
 
 #include "clone.h"
+#include "backend.h"
 #include "map.h"
 #include "progress.h"
 #include "queue.h"
@@ -920,14 +921,15 @@ bool is_vol_cap_supported(char* path, int vol_cap) {
 }
 #endif /* __APPLE__ */
 
+#if defined(__APPLE__)
 __attribute__((const))
+#endif
 bool is_clonefile_supported(char* path) {
 #if defined(__APPLE__)
     return is_vol_cap_supported(path, VOL_CAP_INT_CLONE);
 #else
-    /* TODO: probe active backend (FICLONE/UBT) once Task 5 lands */
     (void)path;
-    return false;
+    return backend_is_available(BACKEND_FICLONE);
 #endif
 }
 
@@ -1087,8 +1089,12 @@ int main(int argc, char* argv[]) {
         dc.progress = NULL;
     }
     
+    // Initialize clone backend
+    CloneBackend backend = backend_init();
+
     // Print verbose runtime information if requested
     if (dc.verbosity > 0) {
+        printf("clone backend: %s\n", backend_name(backend));
         dedup_runtime_caps_print_verbose();
         dedup_runtime_dispatch_print_verbose();
     }
