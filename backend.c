@@ -104,7 +104,11 @@ int backend_is_available(CloneBackend b) {
            was already probed during init */
         return selected_backend == BACKEND_FICLONE;
     case BACKEND_UBT:
-        return 0; /* not yet implemented */
+#if defined(HAVE_UBT)
+        return 1;
+#else
+        return 0; /* libubt not linked */
+#endif
     case BACKEND_AUTO:
         return selected_backend != BACKEND_AUTO &&
                selected_backend != BACKEND_UBT;

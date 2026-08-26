@@ -61,13 +61,21 @@ OBJECTS = \
 
 all: dedup
 
+# Optional userspace BTRFS backend (UBT=1 to enable)
+ifdef UBT
+CFLAGS += -DHAVE_UBT -Iubifs
+LDFLAGS_UBT = -Lubifs -lubt
+else
+LDFLAGS_UBT =
+endif
+
 dedup.o: CFLAGS += -I/opt/homebrew/include
 
 dedup.arm: CFLAGS += -target arm64-apple-macos11 -I/opt/homebrew/include
 dedup.x86_64: CFLAGS += -target x86_64-apple-macos11 -I/opt/homebrew/include
 
 dedup dedup.arm dedup.x86_64: $(OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $^ -L/opt/homebrew/lib -lxxhash
+	$(CC) $(CFLAGS) -o $@ $^ -L/opt/homebrew/lib -lxxhash $(LDFLAGS_UBT)
 	mv $@ $@.unsigned
 	codesign -s - -v -f $(ENTITLEMENT_FLAGS) $@.unsigned
 	mv $@.unsigned $@

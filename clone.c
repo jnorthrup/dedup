@@ -47,6 +47,13 @@
 
 #include "clone.h"
 
+#if defined(HAVE_UBT)
+#include "ubt.h"
+#endif
+#if defined(__linux__) || defined(HAVE_UBT)
+#include <fcntl.h>
+#endif
+
 int find_zero_file(const char* restrict path) {
     if (access(path, W_OK)) {
         return 1;
@@ -101,7 +108,17 @@ char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
 }
 
 int genfile_clone(const char* src, const char* dst) {
-#if defined(__APPLE__)
+#if defined(HAVE_UBT)
+    int src_fd = open(src, O_RDONLY);
+    if (src_fd < 0) return errno;
+    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (dst_fd < 0) { int e = errno; close(src_fd); return e; }
+    int r = ubt_clone(dst_fd, src_fd);
+    int e = errno;
+    close(src_fd);
+    close(dst_fd);
+    return r ? e : 0;
+#elif defined(__APPLE__)
     return clonefile(src, dst, 0);
 #elif defined(__FREEBSD__)
     // n.b.! This is completely untested and probably erases
