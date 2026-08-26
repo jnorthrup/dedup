@@ -14,3 +14,4 @@ dedup.universal
 test/test-data
 test/dedup_check
 .cache/
+ubifs/libubt.a
