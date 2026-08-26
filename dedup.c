@@ -1256,7 +1256,11 @@ int main(int argc, char* argv[]) {
                                     entry->fts_statp->st_dev,
                                     entry->fts_statp->st_ino,
                                     entry->fts_statp->st_nlink,
+#if defined(__APPLE__)
                                     entry->fts_statp->st_flags,
+#else
+                                    0, /* no portable uchg equivalent on Linux */
+#endif
                                     entry->fts_statp->st_size,
                                     sequence,
                                     entry->fts_level);
@@ -1289,7 +1293,11 @@ int main(int argc, char* argv[]) {
                                     entry->fts_statp->st_dev,
                                     entry->fts_statp->st_ino,
                                     entry->fts_statp->st_nlink,
+#if defined(__APPLE__)
                                     entry->fts_statp->st_flags,
+#else
+                                    0, /* no portable uchg equivalent on Linux */
+#endif
                                     entry->fts_statp->st_size,
                                     sequence,
                                     entry->fts_level);
