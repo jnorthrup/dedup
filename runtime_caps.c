@@ -4,6 +4,7 @@
 
 #include "runtime_caps.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -209,4 +210,17 @@ const DedupRuntimeCaps* dedup_runtime_caps_get(void) {
 void dedup_runtime_caps_reset_for_tests(void) {
     memset(&g_runtime_caps, 0, sizeof(g_runtime_caps));
     g_runtime_caps_initialized = false;
+}
+
+void dedup_runtime_caps_print_verbose(void) {
+    const DedupRuntimeCaps* caps = dedup_runtime_caps_get();
+    fprintf(stderr, "runtime_caps:\n");
+    fprintf(stderr, "  cpu: apple_arm64=%d neon=%d dotprod=%d i8mm=%d crc32=%d pmull=%d sha3=%d\n",
+            caps->apple_arm64, caps->neon, caps->dotprod, caps->i8mm, caps->crc32, caps->pmull, caps->sha3);
+    fprintf(stderr, "  platform: unified_memory=%d metal_available=%d\n", caps->unified_memory, caps->metal_available);
+    fprintf(stderr, "  bench: memcmp_4k=%.2fGiB/s memcmp_64k=%.2fGiB/s memcmp_1m=%.2fGiB/s memcmp_8m=%.2fGiB/s\n",
+            caps->memcmp_gib_s_4k, caps->memcmp_gib_s_64k, caps->memcmp_gib_s_1m, caps->memcmp_gib_s_8m);
+    if (caps->exact_cpu_tiles_gib_s_1m > 0.0) {
+        fprintf(stderr, "  bench: exact_cpu_tiles_1m=%.2fGiB/s\n", caps->exact_cpu_tiles_gib_s_1m);
+    }
 }

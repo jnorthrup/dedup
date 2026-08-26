@@ -518,37 +518,44 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
 // Returns true if the entry was pruned (caller should free it), false if it survived.
 static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clones, DedupContext* c) {
+    bool pruned = false;
+
     if (fe->nlink > 1) {
         uint64_t key = (uint64_t)fe->device << 32 | (uint64_t)(fe->inode & 0xFFFFFFFF);
         if (seen_set_insert(seen_inodes, key)) {
-            pthread_mutex_lock(&c->metrics_mutex);
-            c->already_saved += fe->size;
-            c->pruned++;
-            pthread_mutex_unlock(&c->metrics_mutex);
-            PROGRESS_LOCK(c->progress, &c->progress_mutex, {
-                c->progress->completedUnitCount++;
-            });
-            display_status(c, fe->path);
-            return true;
+            pruned = true;
         }
     }
 
-    uint64_t clone_id = get_clone_id(fe->path);
-    if (clone_id != 0) {
-        if (seen_set_insert(seen_clones, clone_id)) {
-            pthread_mutex_lock(&c->metrics_mutex);
-            c->already_saved += fe->size;
-            c->pruned++;
-            pthread_mutex_unlock(&c->metrics_mutex);
-            PROGRESS_LOCK(c->progress, &c->progress_mutex, {
-                c->progress->completedUnitCount++;
-            });
-            display_status(c, fe->path);
-            return true;
+    if (!pruned) {
+        uint64_t clone_id = get_clone_id(fe->path);
+        if (clone_id != 0) {
+            if (seen_set_insert(seen_clones, clone_id)) {
+                pruned = true;
+            }
         }
     }
 
-    return false;
+    if (!pruned) {
+        return false;
+    }
+
+    // A pruned entry never reaches visit_entry, so its sequence number would
+    // never be advanced by visit_order_end. A worker waiting on
+    // visit_order_begin would block forever and deadlock the whole run, so
+    // advance it here instead.
+    visit_order_begin(c, fe->sequence);
+    visit_order_end(c);
+
+    pthread_mutex_lock(&c->metrics_mutex);
+    c->already_saved += fe->size;
+    c->pruned++;
+    pthread_mutex_unlock(&c->metrics_mutex);
+    PROGRESS_LOCK(c->progress, &c->progress_mutex, {
+        c->progress->completedUnitCount++;
+    });
+    display_status(c, fe->path);
+    return true;
 }
 
 void* prune_work(void* ctx) {
@@ -1063,6 +1070,12 @@ int main(int argc, char* argv[]) {
 
     if (!isatty(STDOUT_FILENO)) {
         dc.progress = NULL;
+    }
+    
+    // Print verbose runtime information if requested
+    if (dc.verbosity > 0) {
+        dedup_runtime_caps_print_verbose();
+        dedup_runtime_dispatch_print_verbose();
     }
     
     // Open summary file if requested

@@ -29,5 +29,6 @@ typedef struct DedupRuntimeCaps {
 
 const DedupRuntimeCaps* dedup_runtime_caps_get(void);
 void dedup_runtime_caps_reset_for_tests(void);
+void dedup_runtime_caps_print_verbose(void);
 
 #endif // __DEDUP_RUNTIME_CAPS_H__

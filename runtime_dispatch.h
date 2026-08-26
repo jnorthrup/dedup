@@ -35,5 +35,6 @@ const DedupRuntimeDispatch* dedup_runtime_dispatch_get(void);
 bool dedup_runtime_witness_compare(const char* a_path, const char* b_path, uint64_t size);
 bool dedup_runtime_exact_compare(const char* a_path, const char* b_path, uint64_t size);
 void dedup_runtime_dispatch_reset_for_tests(void);
+void dedup_runtime_dispatch_print_verbose(void);
 
 #endif // __DEDUP_RUNTIME_DISPATCH_H__

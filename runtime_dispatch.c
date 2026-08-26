@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -317,4 +318,14 @@ bool dedup_runtime_exact_compare(const char* a_path, const char* b_path, uint64_
 void dedup_runtime_dispatch_reset_for_tests(void) {
     memset(&g_runtime_dispatch, 0, sizeof(g_runtime_dispatch));
     g_runtime_dispatch_initialized = false;
+}
+
+void dedup_runtime_dispatch_print_verbose(void) {
+    const DedupRuntimeDispatch* dispatch = dedup_runtime_dispatch_get();
+    fprintf(stderr, "runtime_dispatch:\n");
+    fprintf(stderr, "  fast_hash=%s strong_hash=%s\n", dispatch->fast_hash_name, dispatch->strong_hash_name);
+    fprintf(stderr, "  witness=%s exact_small=%s exact_large=%s\n",
+            dispatch->witness_name, dispatch->exact_small_name, dispatch->exact_large_name);
+    fprintf(stderr, "  thresholds: witness=%zu exact_large=%zu gpu_batch=%zu\n",
+            dispatch->witness_threshold, dispatch->exact_large_threshold, dispatch->gpu_batch_threshold);
 }
