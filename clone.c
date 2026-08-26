@@ -29,8 +29,12 @@
 #include <copyfile.h>
 #endif
 #include <sys/stat.h>
-#if defined(__FREEBSD__)
+#if defined(__FREEBSD__) || defined(__linux__)
 #include <sys/ioctl.h>
+#endif
+#if defined(__linux__)
+#include <fcntl.h>
+#include <linux/fs.h>
 #endif
 
 #include <err.h>
@@ -117,12 +121,22 @@ int genfile_clone(const char* src, const char* dst) {
         perror("open(2) failed");
         return errno;
     }
-    result = ioctl(dst_fd, CF_FICLONE, src_fd);
+    int result = ioctl(dst_fd, CF_FICLONE, src_fd);
     int errno_saved = errno;
     close(src_fd);
     close(dst_fd);
     errno = errno_saved;
     return result;
+#elif defined(__linux__)
+    int s = open(src, O_RDONLY);
+    if (s < 0) return errno;
+    int d = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (d < 0) { int e = errno; close(s); return e; }
+    int r = ioctl(d, FICLONE, s);   /* <linux/fs.h> */
+    int e = errno;
+    close(s);
+    close(d);
+    return r ? e : 0;
 #else
 #error Operating system not supported.
 #endif
@@ -180,7 +194,23 @@ int replace_with_clone(const char* src, const char* dst) {
         return ENOENT;
     }
 #else
-#error Operating system not supported
+    /* Linux/FreeBSD: verify clone produced a same-size file */
+    {
+        struct stat src_sb, dst_sb;
+        if (stat(src, &src_sb) || stat(path, &dst_sb)) {
+            perror("stat(2) failed during clone verification");
+            unlink(path);
+            return errno;
+        }
+        if (src_sb.st_size != dst_sb.st_size) {
+            fprintf(stderr,
+                    "clone size mismatch: %zu vs %zu\n",
+                    (size_t)src_sb.st_size,
+                    (size_t)dst_sb.st_size);
+            unlink(path);
+            return EIO;
+        }
+    }
 #endif
 
     // TODO: use COPYFILE_CHECK to verify that nothing
