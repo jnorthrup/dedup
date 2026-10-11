@@ -225,6 +225,20 @@ START_TEST(dedup_failed_replacement_exit_status) {
     ck_assert_ptr_nonnull(strstr(output, "replacements failed: 1\n"));
 } END_TEST
 
+START_TEST(dedup_skipped_not_counted_as_saved) {
+    // Read-only duplicates are left in place. They are still stored twice, so
+    // they must be reported as skipped, not as space already saved.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/readonly-files"
+                               " && printf readonly > test-data/clonefile/readonly-files/a"
+                               " && cp test-data/clonefile/readonly-files/a test-data/clonefile/readonly-files/b"
+                               " && chmod 444 test-data/clonefile/readonly-files/a"
+                               " test-data/clonefile/readonly-files/b"));
+    char* output = run("../dedup -P test-data/clonefile/readonly-files");
+    ck_assert_str_eq("duplicates found: 0\nentries pruned: 0\nbytes saved: 0 bytes\n"
+                     "already saved: 0 bytes\nduplicates skipped: 1 (8 bytes)\n", output);
+    free(output);
+} END_TEST
+
 Suite* dedup_suite() {
     TCase* tc = tcase_create("dedup");
     tcase_add_test(tc, dedup_empty);
@@ -243,6 +257,7 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_dry_run_reports_without_terminal);
     tcase_add_test(tc, dedup_permission_denied);
     tcase_add_test(tc, dedup_failed_replacement_exit_status);
+    tcase_add_test(tc, dedup_skipped_not_counted_as_saved);
 
     Suite* s = suite_create("dedup");
     suite_add_tcase(s, tc);

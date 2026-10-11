@@ -166,6 +166,8 @@ typedef struct DedupContext {
     size_t saved;
     size_t already_saved;
     size_t pruned;
+    size_t skipped;       // Duplicates left in place (hard-linked, unwritable, ...)
+    size_t skipped_bytes;
     size_t failed;       // Duplicates that could not be replaced
     size_t total_bytes;  // Accumulated bytes of all scanned files
     size_t queued_count; // Entries in raw_queue + work_queue combined
@@ -360,6 +362,20 @@ static void visit_order_end(DedupContext* ctx) {
     pthread_mutex_unlock(&ctx->visit_order_mutex);
 }
 
+// A duplicate that is left in place. Its bytes are still stored twice, so it
+// is counted as skipped, never as space already saved.
+static void skip_duplicate(DedupContext* ctx, const FileEntry* fe, const char* reason) {
+    if (ctx->verbosity) {
+        REPORT_LOCKED(ctx, {
+            printf("skipping %s, %s\n", fe->path, reason);
+        });
+    }
+    pthread_mutex_lock(&ctx->metrics_mutex);
+    ctx->skipped++;
+    ctx->skipped_bytes += fe->size;
+    pthread_mutex_unlock(&ctx->metrics_mutex);
+}
+
 void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
     if (!fe || !ctx) {
         return;
@@ -417,14 +433,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
         // Skip if hardlinked and not forcing
         if (!ctx->force && fe->nlink > 1) {
-            if (ctx->verbosity) {
-                REPORT_LOCKED(ctx, {
-                    printf("skipping %s, hardlinked\n", fe->path);
-                });
-            }
-            pthread_mutex_lock(&ctx->metrics_mutex);
-            ctx->already_saved += fe->size;
-            pthread_mutex_unlock(&ctx->metrics_mutex);
+            skip_duplicate(ctx, fe, "hardlinked");
             free_signature(sig);
             visit_order_end(ctx);
             return;
@@ -433,9 +442,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Skip if immutable or read-only
         if (fe->flags & UF_IMMUTABLE || fe->flags & SF_IMMUTABLE ||
             (access(fe->path, W_OK) != 0)) {
-            pthread_mutex_lock(&ctx->metrics_mutex);
-            ctx->already_saved += fe->size;
-            pthread_mutex_unlock(&ctx->metrics_mutex);
+            skip_duplicate(ctx, fe, "immutable or not writable");
             free_signature(sig);
             visit_order_end(ctx);
             return;
@@ -455,10 +462,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         } else {
             // Check if clone conversion is disabled
             if (ctx->replace_mode == DEDUP_CLONE && !ctx->clone_converted) {
-                // Skip clone conversion, just count as already saved
-                pthread_mutex_lock(&ctx->metrics_mutex);
-                ctx->already_saved += fe->size;
-                pthread_mutex_unlock(&ctx->metrics_mutex);
+                skip_duplicate(ctx, fe, "clone conversion disabled");
                 free_signature(sig);
                 visit_order_end(ctx);
                 return;
@@ -995,6 +999,8 @@ int main(int argc, char* argv[]) {
         .saved = 0,
         .already_saved = 0,
         .pruned = 0,
+        .skipped = 0,
+        .skipped_bytes = 0,
         .failed = 0,
         .total_bytes = 0,
         .queued_count = 0,
@@ -1425,6 +1431,16 @@ int main(int argc, char* argv[]) {
         printf("%zu", dc.already_saved);
     }
     putchar('\n');
+
+    if (dc.skipped) {
+        printf("duplicates skipped: %zu (", dc.skipped);
+        if (human_readable) {
+            printf("%s", format_bytes(dc.skipped_bytes, dc.output_format));
+        } else {
+            printf("%zu", dc.skipped_bytes);
+        }
+        printf(")\n");
+    }
 
     if (dc.failed) {
         printf("replacements failed: %zu\n", dc.failed);
