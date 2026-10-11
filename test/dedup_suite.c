@@ -186,6 +186,17 @@ START_TEST(dedup_dry_run) {
     ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 
+START_TEST(dedup_dry_run_reports_without_terminal) {
+    // run() reads stdout through a pipe, so no status line is drawn. The
+    // dry-run plan must be printed anyway.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/report"
+                               " && printf report > test-data/clonefile/report/a"
+                               " && cp test-data/clonefile/report/a test-data/clonefile/report/b"));
+    char* output = run("../dedup -nv test-data/clonefile/report");
+    ck_assert_ptr_nonnull(strstr(output, "would deduplicate test-data/clonefile/report/"));
+    free(output);
+} END_TEST
+
 START_TEST(dedup_permission_denied) {
     char* output = run("../dedup -nP test-data/clonefile/clone-dst-acls 2>&1");
     ck_assert_ptr_nonnull(output);
@@ -208,6 +219,7 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_help);
     tcase_add_test(tc, dedup_ignore_refused);
     tcase_add_test(tc, dedup_dry_run);
+    tcase_add_test(tc, dedup_dry_run_reports_without_terminal);
     tcase_add_test(tc, dedup_permission_denied);
 
     Suite* s = suite_create("dedup");

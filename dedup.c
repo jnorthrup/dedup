@@ -84,6 +84,19 @@ static char sccsid[] = "@(#)dedup.c)";
         } \
     } while (0)
 
+// Print a message without tearing the status line. Unlike PROGRESS_LOCK, the
+// block always runs: messages must not depend on whether a progress display
+// exists (-P, or stdout that is not a terminal). display_status() draws the
+// status line only when stdout is a terminal, so only then is it cleared.
+#define REPORT_LOCKED(ctx, block) do { \
+        pthread_mutex_lock(&(ctx)->progress_mutex); \
+        if (isatty(STDOUT_FILENO)) { \
+            clear_progress(); \
+        } \
+        block; \
+        pthread_mutex_unlock(&(ctx)->progress_mutex); \
+    } while (0)
+
 // Forward declaration
 typedef struct DedupContext DedupContext;
 
@@ -352,8 +365,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
     // Insert into signature table and check for duplicates
     if (!ctx->signatures) {
-        PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
-            clear_progress();
+        REPORT_LOCKED(ctx, {
             fprintf(stderr, "signature table not initialized for %s\n", fe->path);
         });
         free_signature(sig);
@@ -369,8 +381,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
     // Safety check: table size should only increase by 0 or 1
     if (table_size_after > table_size_before + 1) {
-        PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
-            clear_progress();
+        REPORT_LOCKED(ctx, {
             fprintf(stderr, "warning: signature table size increased by %zu (expected 0 or 1)\n",
                     table_size_after - table_size_before);
         });
@@ -397,8 +408,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Skip if hardlinked and not forcing
         if (!ctx->force && fe->nlink > 1) {
             if (ctx->verbosity) {
-                PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
-                    clear_progress();
+                REPORT_LOCKED(ctx, {
                     printf("skipping %s, hardlinked\n", fe->path);
                 });
             }
@@ -424,8 +434,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Perform deduplication
         if (ctx->dry_run) {
             if (ctx->verbosity) {
-                PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
-                    clear_progress();
+                REPORT_LOCKED(ctx, {
                     printf("would deduplicate %s to %s\n", fe->path, existing->path);
                 });
             }
@@ -465,8 +474,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                 return;
             } else {
                 if (ctx->verbosity) {
-                    PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
-                        clear_progress();
+                    REPORT_LOCKED(ctx, {
                         printf("deduplicated %s\n", fe->path);
                     });
                 }
@@ -507,8 +515,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             display_status(ctx, fe->path);
         } else {
             // Table failed to take ownership (allocation failure)
-            PROGRESS_LOCK(ctx->progress, &ctx->progress_mutex, {
-                clear_progress();
+            REPORT_LOCKED(ctx, {
                 fprintf(stderr, "failed to store signature for %s: memory allocation failed\n", fe->path);
             });
             free_signature(sig);
@@ -1173,8 +1180,7 @@ int main(int argc, char* argv[]) {
     while ((entry = fts_read(traversal)) != NULL) {
         if (entry->fts_errno) {
             char* e = strerror(entry->fts_errno);
-            PROGRESS_LOCK(dc.progress, &dc.progress_mutex, {
-                clear_progress();
+            REPORT_LOCKED(&dc, {
                 warnx("%s: error (%d): %s",
                       entry->fts_path,
                       entry->fts_errno,
