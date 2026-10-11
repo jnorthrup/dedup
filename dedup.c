@@ -55,6 +55,7 @@ static char sccsid[] = "@(#)dedup.c)";
 #include <err.h>
 #include <fts.h>
 #include <getopt.h>
+#include <limits.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <stdbool.h>
