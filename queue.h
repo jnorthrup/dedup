@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #include <sys/queue.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 STAILQ_HEAD(FileEntryHead, FileEntry);
 

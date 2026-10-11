@@ -28,17 +28,26 @@
 #define __DEDUP_UTIL_H__
 
 #include "attr.h"
+#if defined(__APPLE__)
 #include "map.h"
+#endif
 #include "queue.h"
+
+#include <stdint.h>
+#include <sys/types.h>
 
 /// return the clone id associated with the file at `path`.
 /// two files with the same clone id share blocks, however,
 /// two files may share blocks but have different clone ids.
+/// 0 means unknown: the id could not be read, or the platform has none.
 uint64_t get_clone_id(const char* restrict path);
-int may_share_blocks(const char* restrict path);
-size_t private_size(const char* restrict path);
 ino_t get_inode(const char* restrict path);
 
+#if defined(__APPLE__)
+int may_share_blocks(const char* restrict path);
+size_t private_size(const char* restrict path);
+
 FileMetadata* metadata_from_entry(FileEntry* fe) ATTR_MALLOC(free_metadata, 1);
+#endif
 
 #endif // __DEDUP_UTIL_H__

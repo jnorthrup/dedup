@@ -53,9 +53,9 @@ void display_progress(const Progress* progress) {
     }
     fprintf(stderr, "] %.0f%% (%llu of %llu) %s",
             percent_complete * 100.0,
-            progress->completedUnitCount,
-            progress->totalUnitCount,
-            progress->note ?: "");
+            (unsigned long long)progress->completedUnitCount,
+            (unsigned long long)progress->totalUnitCount,
+            progress->note ? progress->note : "");
     fflush(stderr);
 }
 

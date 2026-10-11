@@ -40,6 +40,7 @@
 #include <err.h>
 #include <errno.h>
 #include <libgen.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,18 +80,30 @@ char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
     out[0] = '\0';
 
     char dir[PATH_MAX] = { 0 };
+    char base[PATH_MAX] = { 0 };
+#if defined(__APPLE__)
     if (!dirname_r(path, dir)) {
         return NULL;
     }
 
-    char base[PATH_MAX] = { 0 };
     if (!basename_r(path, base)) {
         return NULL;
     }
+#else
+    // POSIX dirname(3) and basename(3) may modify their argument and may
+    // return static storage, so split a private copy and copy the results.
+    char copy[PATH_MAX];
+    if (snprintf(copy, sizeof(copy), "%s", path) >= (int)sizeof(copy)) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    snprintf(dir, sizeof(dir), "%s", dirname(copy));
+    snprintf(copy, sizeof(copy), "%s", path);
+    snprintf(base, sizeof(base), "%s", basename(copy));
+#endif
 
-    if (strlcat(out, dir, size) >= size ||
-        strlcat(out, "/.~.", size) >= size ||
-        strlcat(out, base, size) >= size) {
+    int length = snprintf(out, size, "%s/.~.%s", dir, base);
+    if (length < 0 || (size_t)length >= size) {
         errno = ENAMETOOLONG;
         return NULL;
     }

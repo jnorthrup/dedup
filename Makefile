@@ -21,7 +21,6 @@ CFLAGS += \
     -fpic \
     -fPIE \
     --param=ssp-buffer-size=4  \
-    -m64 \
     -ftrapv \
     -pipe \
     -fstack-protector \
@@ -38,7 +37,6 @@ OBJECTS = \
     alist.o \
     backend.o \
     clone.o \
-    map.o \
     progress.o \
     queue.o \
     seen_set.o \
@@ -69,16 +67,30 @@ else
 LDFLAGS_UBT =
 endif
 
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Darwin)
+CFLAGS += -m64
+# map.c backs the unused two-phase index in dedup.c; it needs NetBSD
+# rbtree(3) and CommonCrypto, which only Apple platforms provide.
+OBJECTS += map.o
+PLATFORM_LDLIBS = -L/opt/homebrew/lib -lxxhash
 dedup.o: CFLAGS += -I/opt/homebrew/include
+else
+CFLAGS += -pthread
+PLATFORM_LDLIBS = -pthread
+endif
 
 dedup.arm: CFLAGS += -target arm64-apple-macos11 -I/opt/homebrew/include
 dedup.x86_64: CFLAGS += -target x86_64-apple-macos11 -I/opt/homebrew/include
 
 dedup dedup.arm dedup.x86_64: $(OBJECTS)
-	$(CC) $(CFLAGS) -o $@ $^ -L/opt/homebrew/lib -lxxhash $(LDFLAGS_UBT)
+	$(CC) $(CFLAGS) -o $@ $^ $(PLATFORM_LDLIBS) $(LDFLAGS_UBT)
+ifeq ($(UNAME_S),Darwin)
 	mv $@ $@.unsigned
 	codesign -s - -v -f $(ENTITLEMENT_FLAGS) $@.unsigned
 	mv $@.unsigned $@
+endif
 
 dedup.universal:
 	rm -f *.o

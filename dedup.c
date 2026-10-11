@@ -44,13 +44,16 @@ static char sccsid[] = "@(#)dedup.c)";
 #endif // 0
 #endif // lint
 
-#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
+#if defined(__APPLE__)
+#include <sys/mount.h>
 #include <sys/attr.h>
 #include <sys/sysctl.h>
-#include <sys/ioctl.h>
+#endif
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <err.h>
 #include <fts.h>
@@ -65,7 +68,9 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include "clone.h"
 #include "backend.h"
+#if defined(__APPLE__)
 #include "map.h"
+#endif
 #include "progress.h"
 #include "queue.h"
 #include "output_format.h"
@@ -75,6 +80,17 @@ static char sccsid[] = "@(#)dedup.c)";
 #include "signature.h"
 #include "sig_table.h"
 #include "utils.h"
+
+#if !defined(__APPLE__)
+// BSD file flags from st_flags. FileEntry.flags is always 0 elsewhere; on
+// Linux an immutable file fails the access(W_OK) check instead.
+#ifndef UF_IMMUTABLE
+#define UF_IMMUTABLE 0
+#endif
+#ifndef SF_IMMUTABLE
+#define SF_IMMUTABLE 0
+#endif
+#endif
 
 #define PROGRESS_LOCK(p, m, block) do { \
         if ((p)) { \
@@ -419,9 +435,11 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Found a duplicate
         display_status(ctx, fe->path);
 
-        // Check if already deduplicated
+        // Check if already deduplicated. A clone id of 0 means it could not
+        // be read (or the platform has none), which proves nothing.
         uint64_t current_clone_id = get_clone_id(fe->path);
-        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id == existing->clone_id) ||
+        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id != 0 &&
+             current_clone_id == existing->clone_id) ||
             (ctx->replace_mode == DEDUP_LINK && fe->inode == get_inode(existing->path))) {
             pthread_mutex_lock(&ctx->metrics_mutex);
             ctx->already_saved += fe->size;
@@ -501,6 +519,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                     });
                 }
 
+#if defined(__APPLE__)
                 // Verify clone worked if using clone mode
                 if (ctx->replace_mode == DEDUP_CLONE) {
                     uint64_t new_clone_id = get_clone_id(fe->path);
@@ -511,6 +530,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                         // Else: clone_id mismatch but no private data = success
                     }
                 }
+#endif
 
                 if (result == 0) {
                     pthread_mutex_lock(&ctx->metrics_mutex);
@@ -701,6 +721,10 @@ void* dedup_work(void* ctx) {
     return NULL;
 }
 
+#if defined(__APPLE__)
+// Not called: the single-pass path in visit_entry() replaced this two-phase
+// selection. It depends on map.c (NetBSD rbtree, CommonCrypto), which only
+// builds on Apple platforms.
 size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
     FileMetadata* origin = NULL;
     char* reason = NULL;
@@ -871,6 +895,7 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
 
     return 0;
 }
+#endif // __APPLE__
 
 __attribute__((noreturn))
 static void usage(char* pgm, DedupContext* ctx) {
@@ -909,10 +934,15 @@ static void usage(char* pgm, DedupContext* ctx) {
 
 __attribute__((const))
 int32_t cpu_count() {
+#if defined(__APPLE__)
     int32_t c = 0;
     size_t len = sizeof(int32_t);
     sysctlbyname("hw.ncpu", &c, &len, NULL, 0);
     return c;
+#else
+    long c = sysconf(_SC_NPROCESSORS_ONLN);
+    return c > 0 ? (int32_t)c : 1;
+#endif
 }
 
 #if defined(__APPLE__)
@@ -965,8 +995,11 @@ bool is_clonefile_supported(char* path) {
 #if defined(__APPLE__)
     return is_vol_cap_supported(path, VOL_CAP_INT_CLONE);
 #else
+    // Clone-and-rename cannot carry ownership, timestamps or xattrs over to
+    // the replacement here, so clone mode is unavailable until files can be
+    // deduplicated in place.
     (void)path;
-    return backend_is_available(BACKEND_FICLONE);
+    return false;
 #endif
 }
 
@@ -1181,12 +1214,16 @@ int main(int argc, char* argv[]) {
     }
     // LCOV_EXCL_STOP
 
-    pthread_t pruner_thread = NULL;
+    // pthread_t is opaque (a pointer on Apple platforms, an integer on
+    // glibc), so record whether the pruner started instead of testing it.
+    pthread_t pruner_thread;
+    bool pruner_started = false;
     if (dc.thread_count > 0) {
         int r = pthread_create(&pruner_thread, NULL, prune_work, &dc);
         if (r) {
             warn("Could not create pruner thread: error %i", r);
-            pruner_thread = NULL;
+        } else {
+            pruner_started = true;
         }
     }
 
@@ -1377,7 +1414,7 @@ int main(int argc, char* argv[]) {
     pthread_mutex_unlock(&dc.scan_done_mutex);
 
     // Wait for pruner to drain raw_queue
-    if (pruner_thread) {
+    if (pruner_started) {
         if (pthread_join(pruner_thread, NULL)) {
             fprintf(stderr, "Failed to wait for pruner thread\n");
         }
@@ -1393,8 +1430,11 @@ int main(int argc, char* argv[]) {
         // is an opaque type (to us). if `pthread_create` is successful
         // the API contract says we can pass that value to pthread_join.
         // the assertion is less intrusive than suppressing the warning
-        // by checking for the _clang_analyzer macro
+        // by checking for the _clang_analyzer macro. (glibc's pthread_t is
+        // an integer, where comparing it with NULL does not compile.)
+#if defined(__APPLE__)
         assert(threads[i] != NULL);
+#endif
         if (pthread_join(threads[i], NULL)) {
             fprintf(stderr, "Failed to wait for thread %i\n", i);
         }

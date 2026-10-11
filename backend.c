@@ -23,34 +23,6 @@
 
 static CloneBackend selected_backend = BACKEND_AUTO;
 
-#if defined(__linux__)
-static CloneBackend probe_ficlone(void) {
-    /* Create two small files and attempt FICLONE between them */
-    char src[] = "/tmp/dedup_probe_src_XXXXXX";
-    char dst[] = "/tmp/dedup_probe_dst_XXXXXX";
-    int src_fd = mkstemp(src);
-    if (src_fd < 0) return BACKEND_AUTO;
-    int dst_fd = mkstemp(dst);
-    if (dst_fd < 0) { close(src_fd); unlink(src); return BACKEND_AUTO; }
-
-    /* Write a byte so the file is non-empty */
-    char buf[1] = { 'x' };
-    write(src_fd, buf, 1);
-    fsync(src_fd);
-
-    int r = ioctl(dst_fd, FICLONE, src_fd);
-    int e = errno;
-    close(src_fd);
-    close(dst_fd);
-    unlink(src);
-    unlink(dst);
-
-    if (r == 0) return BACKEND_FICLONE;
-    (void)e;
-    return BACKEND_AUTO;
-}
-#endif /* __linux__ */
-
 CloneBackend backend_init(void) {
     const char* env = getenv("DEDUP_BACKEND");
     if (env) {
@@ -71,8 +43,6 @@ CloneBackend backend_init(void) {
     if (selected_backend == BACKEND_AUTO) {
 #if defined(__APPLE__)
         selected_backend = BACKEND_CLONEFILE;
-#elif defined(__linux__)
-        selected_backend = probe_ficlone();
 #else
         selected_backend = BACKEND_AUTO;
 #endif
