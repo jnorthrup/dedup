@@ -183,7 +183,7 @@ typedef struct DedupContext {
     ReplaceMode replace_mode;
     OutputFormat output_format;
     bool clone_converted;        // Whether to convert clones (true by default)
-    char* summary_file;          // File to write detailed summary to (NULL by default)
+    const char* summary_file;    // File to write detailed summary to (NULL by default)
     pthread_mutex_t metrics_mutex;
     pthread_mutex_t progress_mutex;
     pthread_mutex_t queue_mutex;
@@ -1117,7 +1117,7 @@ int main(int argc, char* argv[]) {
                 dc.clone_converted = false;
                 break;
             case 'S':
-                dc.summary_file = strdup(optarg);
+                dc.summary_file = optarg;
                 break;
             case '?':
             default:
