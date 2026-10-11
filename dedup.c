@@ -1191,7 +1191,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    pthread_t* threads = calloc(dc.thread_count, sizeof(pthread_t));
+    // -t0 runs on this thread and needs no array (calloc(0) is
+    // implementation-defined)
+    pthread_t* threads = NULL;
+    if (dc.thread_count > 0) {
+        threads = calloc(dc.thread_count, sizeof(pthread_t));
+        if (!threads) {
+            err(1, "could not allocate %d threads", dc.thread_count);
+        }
+    }
     for (int i = 0; i < dc.thread_count; i++) {
         int r = pthread_create(&threads[i], NULL, dedup_work, &dc);
         if (r) {
@@ -1389,7 +1397,7 @@ int main(int argc, char* argv[]) {
     dc.prune_done = 1;
     pthread_mutex_unlock(&dc.prune_done_mutex);
 
-    for (int i = 0; i < dc.thread_count; i++) {
+    for (int i = 0; threads && i < dc.thread_count; i++) {
         // clang-analyzer thinks threads[i] can be NULL, but `pthread_t`
         // is an opaque type (to us). if `pthread_create` is successful
         // the API contract says we can pass that value to pthread_join.
