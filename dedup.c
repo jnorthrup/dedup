@@ -1273,7 +1273,9 @@ int main(int argc, char* argv[]) {
             clonefile_supported = is_clonefile_supported(entry->fts_path);
 
             if (!clonefile_supported) {
-                warnx("Skipping %s: cloning not supported", entry->fts_path);
+                REPORT_LOCKED(&dc, {
+                    warnx("Skipping %s: cloning not supported", entry->fts_path);
+                });
 
                 // if FTS_XDEV is set, we can't accidentally cross into a
                 // volume that does support clonefile, so skip everything else
