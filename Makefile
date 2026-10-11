@@ -187,13 +187,13 @@ check-spelling-man: dedup.1 dict
         tr '”' ' ' | \
 	    aspell list $(AFLAGS) --mode nroff | \
 	    sort -u | \
-	    xargs -n 1 printf "\\033[0;31m$< >>>\033[0m %s\n")
+	    xargs -r -n 1 printf "\\033[0;31m$< >>>\033[0m %s\n")
 
 check-spelling-readme: README.md dict
 	! grep . <<< $$(cat README.md | \
 	    aspell list $(AFLAGS) --mode markdown | \
 	    sort -u | \
-	    xargs -n 1 printf "\\033[0;31m$< >>>\033[0m %s\n")
+	    xargs -r -n 1 printf "\\033[0;31m$< >>>\033[0m %s\n")
 
 check-spelling: check-spelling-readme check-spelling-man
 
@@ -215,8 +215,13 @@ compile_commands.json: $(OBJECTS)
 	mv $@.tmp $@
 compiledb: compile_commands.json
 
+# Name the checks: clang-tidy 23 enables none by default and then fails.
+# DeprecatedOrUnsafeBufferHandling asks for the Annex K (*_s) functions,
+# which neither Apple's nor GNU's C library provides.
+TIDY_CHECKS = clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+
 %.tidy: %.c compiledb
-	clang-tidy $< -- $(CFLAGS) | tee $@
+	clang-tidy --checks='$(TIDY_CHECKS)' $< -- $(CFLAGS) | tee $@
 	[ ! -s $@ ]
 tidy: $(OBJECTS:.o=.tidy)
 

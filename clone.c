@@ -40,6 +40,7 @@
 #include <err.h>
 #include <errno.h>
 #include <libgen.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -274,12 +275,19 @@ int replace_with_link(const char* src, const char* dst) {
     return link(src, dst);
 }
 
-// returns a relative path to dst from src
+// returns a relative path to dst from src, or NULL if either path cannot be
+// resolved or the result cannot be allocated
 char* path_relative_to(const char* src, const char* dst) {
     char* real_src = realpath(src, NULL),
         * real_dst = realpath(dst, NULL),
         * orig_real_src = real_src,
         * orig_real_dst = real_dst;
+
+    if (!real_src || !real_dst) {
+        free(orig_real_src);
+        free(orig_real_dst);
+        return NULL;
+    }
 
     // consume root /
     real_src++;
@@ -324,16 +332,23 @@ char* path_relative_to(const char* src, const char* dst) {
         depth++;
     }
     depth--;
+    if (depth < 0) {
+        depth = 0;
+    }
 
     free(orig_real_src);
-    char* path = calloc(PATH_MAX, 1);
-    int pos = 0;
-    for (int i = 0; i < depth; i++) {
-        path[pos++] = '.';
-        path[pos++] = '.';
-        path[pos++] = '/';
+    // each level adds "../", so the result can be longer than PATH_MAX
+    size_t dst_len = strlen(real_dst);
+    char* path = calloc((size_t)depth * 3 + dst_len + 1, 1);
+    if (path) {
+        size_t pos = 0;
+        for (int i = 0; i < depth; i++) {
+            path[pos++] = '.';
+            path[pos++] = '.';
+            path[pos++] = '/';
+        }
+        memcpy(path + pos, real_dst, dst_len);
     }
-    memcpy(path + pos, real_dst, strlen(real_dst));
     free(orig_real_dst);
 
     return path;

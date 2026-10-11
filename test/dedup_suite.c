@@ -239,6 +239,30 @@ START_TEST(dedup_skipped_not_counted_as_saved) {
     free(output);
 } END_TEST
 
+START_TEST(dedup_keeps_existing_clones) {
+    // "bar" and "bar4" are clones of each other and "bar2" is a separate copy.
+    // Whatever order the directory lists them in, the clones are the origin:
+    // only "bar2" is replaced, and the clone is space already saved.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/clone-family"
+                               " && printf family > test-data/clonefile/clone-family/bar"
+                               " && cp -c test-data/clonefile/clone-family/bar"
+                               " test-data/clonefile/clone-family/bar4"
+                               " && cp test-data/clonefile/clone-family/bar"
+                               " test-data/clonefile/clone-family/bar2"));
+    uint64_t family = get_clone_id("test-data/clonefile/clone-family/bar");
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar4"));
+    ck_assert_uint_ne(family, get_clone_id("test-data/clonefile/clone-family/bar2"));
+
+    char* output = run("../dedup -P test-data/clonefile/clone-family");
+    ck_assert_str_eq("duplicates found: 1\nentries pruned: 0\nbytes saved: 6 bytes\n"
+                     "already saved: 6 bytes\n", output);
+    free(output);
+
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar"));
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar4"));
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar2"));
+} END_TEST
+
 Suite* dedup_suite() {
     TCase* tc = tcase_create("dedup");
     tcase_add_test(tc, dedup_empty);
@@ -258,6 +282,7 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_permission_denied);
     tcase_add_test(tc, dedup_failed_replacement_exit_status);
     tcase_add_test(tc, dedup_skipped_not_counted_as_saved);
+    tcase_add_test(tc, dedup_keeps_existing_clones);
 
     Suite* s = suite_create("dedup");
     suite_add_tcase(s, tc);

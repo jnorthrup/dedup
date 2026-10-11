@@ -157,6 +157,7 @@ FileMetadata* metadata_from_entry(FileEntry* fe) {
             perror("fgetc(3)");
         });
         */
+        fclose(f);
         return NULL;
     }
     fm.first = c;
@@ -168,6 +169,7 @@ FileMetadata* metadata_from_entry(FileEntry* fe) {
             perror("fseek(3)");
         });
         */
+        fclose(f);
         return NULL;
     }
 
@@ -179,6 +181,7 @@ FileMetadata* metadata_from_entry(FileEntry* fe) {
             perror("fgetc(3)");
         });
         */
+        fclose(f);
         return NULL;
     }
     fclose(f);
