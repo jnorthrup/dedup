@@ -66,7 +66,6 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include "clone.h"
 #include "backend.h"
-#include "map.h"
 #include "progress.h"
 #include "queue.h"
 #include "output_format.h"
@@ -158,11 +157,37 @@ static const char* replacement_name(ReplaceMode mode) {
     return "a clone";
 }
 
+// A file with the same content as at least one other, as the traversal found it.
+typedef struct Duplicate {
+    char* path;
+    uint64_t clone_id;
+    dev_t device;
+    ino_t inode;
+    nlink_t nlink;
+    uint32_t flags;
+    size_t size;
+} Duplicate;
+
+// The files that share one content. Every file in the signature table has a
+// set; once a duplicate turns up, members holds the first file seen followed
+// by each duplicate in traversal order. Nothing is replaced until every file
+// has been seen, so the origin is chosen from the whole set (see
+// deduplicate()).
+typedef struct DuplicateSet {
+    Duplicate first;     // The first file seen; the table entry holds its path
+    Duplicate* members;  // NULL until a duplicate is found
+    size_t count;
+    size_t capacity;
+} DuplicateSet;
+
 typedef struct DedupContext {
     Progress* progress;
     FileEntryHead* queue;
     FileEntryHead* raw_queue;
     SigTable* signatures;
+    DuplicateSet** sets;  // Sets with a duplicate, in the order one was found
+    size_t set_count;
+    size_t set_capacity;
     size_t found;
     size_t saved;
     size_t already_saved;
@@ -365,16 +390,81 @@ static void visit_order_end(DedupContext* ctx) {
 
 // A duplicate that is left in place. Its bytes are still stored twice, so it
 // is counted as skipped, never as space already saved.
-static void skip_duplicate(DedupContext* ctx, const FileEntry* fe, const char* reason) {
+static void skip_duplicate(DedupContext* ctx, const Duplicate* d, const char* reason) {
     if (ctx->verbosity) {
         REPORT_LOCKED(ctx, {
-            printf("skipping %s, %s\n", fe->path, reason);
+            printf("skipping %s, %s\n", d->path, reason);
         });
     }
     pthread_mutex_lock(&ctx->metrics_mutex);
     ctx->skipped++;
-    ctx->skipped_bytes += fe->size;
+    ctx->skipped_bytes += d->size;
     pthread_mutex_unlock(&ctx->metrics_mutex);
+}
+
+// Add a file whose content matches the table entry's to the entry's set.
+// Called with signatures_mutex held. Returns false if memory ran out; the file
+// is then left alone.
+static bool add_duplicate(DedupContext* ctx, SigTableEntry* entry,
+                          const Duplicate* found, const char* path) {
+    DuplicateSet* set = entry->data;
+    if (!set) {
+        return false;
+    }
+
+    // the first duplicate also brings in the file it duplicates
+    size_t needed = set->count ? set->count + 1 : 2;
+    if (needed > set->capacity) {
+        size_t capacity = set->capacity ? set->capacity * 2 : 2;
+        Duplicate* members = realloc(set->members, capacity * sizeof(Duplicate));
+        if (!members) {
+            return false;
+        }
+        set->members = members;
+        set->capacity = capacity;
+    }
+
+    if (set->count == 0) {
+        if (ctx->set_count == ctx->set_capacity) {
+            size_t capacity = ctx->set_capacity ? ctx->set_capacity * 2 : 64;
+            DuplicateSet** sets = realloc(ctx->sets, capacity * sizeof(DuplicateSet*));
+            if (!sets) {
+                return false;
+            }
+            ctx->sets = sets;
+            ctx->set_capacity = capacity;
+        }
+
+        char* first_path = strdup(entry->path);
+        if (!first_path) {
+            return false;
+        }
+        set->members[0] = set->first;
+        set->members[0].path = first_path;
+        set->count = 1;
+        ctx->sets[ctx->set_count++] = set;
+    }
+
+    char* copy = strdup(path);
+    if (!copy) {
+        return false;
+    }
+    set->members[set->count] = *found;
+    set->members[set->count].path = copy;
+    set->count++;
+    return true;
+}
+
+static void free_duplicate_set(void* data) {
+    DuplicateSet* set = data;
+    if (!set) {
+        return;
+    }
+    for (size_t i = 0; i < set->count; i++) {
+        free(set->members[i].path);
+    }
+    free(set->members);
+    free(set);
 }
 
 void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
@@ -400,10 +490,35 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         return;
     }
 
+    // The file starts a set of its own, unless its content matches an earlier
+    // file's: then it joins that file's set.
+    DuplicateSet* set = calloc(1, sizeof(DuplicateSet));
+    if (!set) {
+        REPORT_LOCKED(ctx, {
+            fprintf(stderr, "failed to store signature for %s: memory allocation failed\n", fe->path);
+        });
+        free_signature(sig);
+        visit_order_end(ctx);
+        return;
+    }
+    set->first = (Duplicate) {
+        .path = NULL,
+        .clone_id = get_clone_id(fe->path),
+        .device = fe->device,
+        .inode = fe->inode,
+        .nlink = fe->nlink,
+        .flags = fe->flags,
+        .size = fe->size,
+    };
+
     pthread_mutex_lock(&ctx->signatures_mutex);
     size_t table_size_before = sig_table_size(ctx->signatures);
-    SigTableEntry* existing = sig_table_insert(ctx->signatures, sig, fe->path, get_clone_id(fe->path));
+    SigTableEntry* existing = sig_table_insert(ctx->signatures, sig, fe->path, set->first.clone_id, set);
     size_t table_size_after = sig_table_size(ctx->signatures);
+    bool recorded = false;
+    if (existing) {
+        recorded = add_duplicate(ctx, existing, &set->first, fe->path);
+    }
     pthread_mutex_unlock(&ctx->signatures_mutex);
 
     // Safety check: table size should only increase by 0 or 1
@@ -417,145 +532,37 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
     bool table_took_ownership = (table_size_after > table_size_before);
 
     if (existing) {
-        // Found a duplicate
+        // Found a duplicate. It is replaced after the traversal, once the
+        // whole set is known.
         display_status(ctx, fe->path);
-
-        // Check if already deduplicated
-        uint64_t current_clone_id = get_clone_id(fe->path);
-        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id == existing->clone_id) ||
-            (ctx->replace_mode == DEDUP_LINK && fe->inode == get_inode(existing->path))) {
-            pthread_mutex_lock(&ctx->metrics_mutex);
-            ctx->already_saved += fe->size;
-            pthread_mutex_unlock(&ctx->metrics_mutex);
-            free_signature(sig);
-            visit_order_end(ctx);
-            return;
-        }
-
-        // Skip if hardlinked and not forcing
-        if (!ctx->force && fe->nlink > 1) {
-            skip_duplicate(ctx, fe, "hardlinked");
-            free_signature(sig);
-            visit_order_end(ctx);
-            return;
-        }
-
-        // Skip if immutable or read-only
-        if (fe->flags & UF_IMMUTABLE || fe->flags & SF_IMMUTABLE ||
-            (access(fe->path, W_OK) != 0)) {
-            skip_duplicate(ctx, fe, "immutable or not writable");
-            free_signature(sig);
-            visit_order_end(ctx);
-            return;
-        }
-
-        // Perform deduplication
-        if (ctx->dry_run) {
-            if (ctx->verbosity) {
-                REPORT_LOCKED(ctx, {
-                    printf("would deduplicate %s to %s\n", fe->path, existing->path);
-                });
-            }
-            pthread_mutex_lock(&ctx->metrics_mutex);
-            ctx->saved += fe->size;
-            ctx->found++;
-            pthread_mutex_unlock(&ctx->metrics_mutex);
-        } else {
-            // Check if clone conversion is disabled
-            if (ctx->replace_mode == DEDUP_CLONE && !ctx->clone_converted) {
-                skip_duplicate(ctx, fe, "clone conversion disabled");
-                free_signature(sig);
-                visit_order_end(ctx);
-                return;
-            }
-            
-            int result = 0;
-            switch (ctx->replace_mode) {
-            case DEDUP_CLONE:
-                result = replace_with_clone(existing->path, fe->path);
-                break;
-            case DEDUP_LINK:
-                result = replace_with_link(existing->path, fe->path);
-                break;
-            case DEDUP_SYMLINK:
-                result = replace_with_symlink(existing->path, fe->path);
-                break;
-            }
-
-            if (result) {
-                // The replace_* functions print the system error; name the
-                // file that was left alone and fail the run's exit status.
-                REPORT_LOCKED(ctx, {
-                    warnx("could not replace %s with %s of %s",
-                          fe->path, replacement_name(ctx->replace_mode), existing->path);
-                });
-                pthread_mutex_lock(&ctx->metrics_mutex);
-                ctx->failed++;
-                pthread_mutex_unlock(&ctx->metrics_mutex);
-                free_signature(sig);
-                visit_order_end(ctx);
-                return;
-            } else {
-                if (ctx->verbosity) {
-                    REPORT_LOCKED(ctx, {
-                        printf("deduplicated %s\n", fe->path);
-                    });
-                }
-
-                // Verify clone worked if using clone mode
-                if (ctx->replace_mode == DEDUP_CLONE) {
-                    uint64_t new_clone_id = get_clone_id(fe->path);
-                    if (new_clone_id != existing->clone_id) {
-                        if (private_size(fe->path) != 0) {
-                            result = -1; // Mark as failed
-                        }
-                        // Else: clone_id mismatch but no private data = success
-                    }
-                }
-
-                if (result == 0) {
-                    pthread_mutex_lock(&ctx->metrics_mutex);
-                    ctx->saved += fe->size;
-                    ctx->found++;
-                    pthread_mutex_unlock(&ctx->metrics_mutex);
-                    
-                    // Write clone operation to summary file (streamed)
-                    if (ctx->summary_file) {
-                        clone_summary_write(existing->path, fe->path, fe->size);
-                    }
-                } else {
-                    // The file was replaced by a copy that shares no blocks
-                    // with the origin: its data is intact but nothing was saved.
-                    REPORT_LOCKED(ctx, {
-                        warnx("%s was replaced, but the clone does not share blocks with %s",
-                              fe->path, existing->path);
-                    });
-                    pthread_mutex_lock(&ctx->metrics_mutex);
-                    ctx->failed++;
-                    pthread_mutex_unlock(&ctx->metrics_mutex);
-                }
-            }
-        }
-
-        free_signature(sig);
-    } else {
-        // First instance of this signature
-        if (table_took_ownership) {
-            display_status(ctx, fe->path);
-        } else {
-            // Table failed to take ownership (allocation failure)
+        if (!recorded) {
             REPORT_LOCKED(ctx, {
-                fprintf(stderr, "failed to store signature for %s: memory allocation failed\n", fe->path);
+                fprintf(stderr, "failed to record duplicate %s: memory allocation failed\n", fe->path);
             });
-            free_signature(sig);
         }
+        free(set);
+        free_signature(sig);
+    } else if (table_took_ownership) {
+        // First instance of this signature
+        display_status(ctx, fe->path);
+    } else {
+        // Table failed to take ownership (allocation failure)
+        REPORT_LOCKED(ctx, {
+            fprintf(stderr, "failed to store signature for %s: memory allocation failed\n", fe->path);
+        });
+        free(set);
+        free_signature(sig);
     }
 
     visit_order_end(ctx);
 }
 
 // Returns true if the entry was pruned (caller should free it), false if it survived.
-static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clones, DedupContext* c) {
+//
+// Only another path to an inode already seen is pruned. Clones are not: a
+// clone can be modified without changing its clone id, and whether a clone
+// needs replacing depends on the origin chosen for its whole set.
+static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, DedupContext* c) {
     bool pruned = false;
 
     if (fe->nlink > 1) {
@@ -563,17 +570,6 @@ static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clone
         if (seen_set_insert(seen_inodes, key)) {
             pruned = true;
         }
-    }
-
-    if (!pruned) {
-#if defined(__APPLE__)
-        uint64_t clone_id = get_clone_id(fe->path);
-        if (clone_id != 0) {
-            if (seen_set_insert(seen_clones, clone_id)) {
-                pruned = true;
-            }
-        }
-#endif
     }
 
     if (!pruned) {
@@ -601,7 +597,6 @@ static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clone
 void* prune_work(void* ctx) {
     DedupContext* c = ctx;
     SeenSet* seen_inodes = new_seen_set(4096);
-    SeenSet* seen_clones = new_seen_set(4096);
 
     for (;;) {
         pthread_mutex_lock(&c->raw_queue_mutex);
@@ -629,7 +624,7 @@ void* prune_work(void* ctx) {
         c->queued_count--;
         pthread_mutex_unlock(&c->metrics_mutex);
 
-        if (prune_entry(fe, seen_inodes, seen_clones, c)) {
+        if (prune_entry(fe, seen_inodes, c)) {
             file_entry_free(fe);
             continue;
         }
@@ -654,7 +649,6 @@ void* prune_work(void* ctx) {
     }
 
     free_seen_set(seen_inodes);
-    free_seen_set(seen_clones);
     return NULL;
 }
 
@@ -702,175 +696,231 @@ void* dedup_work(void* ctx) {
     return NULL;
 }
 
-size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
-    FileMetadata* origin = NULL;
-    char* reason = NULL;
-    // if there is a file with more than one hard link, use that as the
-    // source candidate (optimally a hardlink with the most links)
-    for (size_t i = 0; i < alist_size(metadata_set); i++) {
-        FileMetadata* fm = alist_get(metadata_set, i);
-        if (fm->nlink > 1 && (!origin || origin->nlink < fm->nlink)) {
-            origin = fm;
+typedef struct CloneRank {
+    uint64_t clone_id;
+    size_t index;
+} CloneRank;
+
+static int compare_clone_rank(const void* a, const void* b) {
+    const CloneRank* x = a;
+    const CloneRank* y = b;
+    if (x->clone_id != y->clone_id) {
+        return x->clone_id < y->clone_id ? -1 : 1;
+    }
+    return (x->index > y->index) - (x->index < y->index);
+}
+
+// Returns how many members of the largest group of clones there are, and sets
+// *first to the index of that group's first member. Ties go to the group seen
+// first. A clone id of 0 is unknown and matches nothing. If memory runs out,
+// every file counts as a group of one.
+static size_t largest_clone_group(const Duplicate* members, size_t count, size_t* first) {
+    *first = 0;
+    CloneRank* ranks = malloc(count * sizeof(CloneRank));
+    if (!ranks) {
+        return 1;
+    }
+    for (size_t i = 0; i < count; i++) {
+        ranks[i] = (CloneRank) { .clone_id = members[i].clone_id, .index = i };
+    }
+    qsort(ranks, count, sizeof(CloneRank), compare_clone_rank);
+
+    size_t largest = 1;
+    for (size_t i = 0; i < count;) {
+        size_t end = i + 1;
+        while (end < count && ranks[end].clone_id == ranks[i].clone_id) {
+            end++;
+        }
+        size_t size = ranks[i].clone_id ? end - i : 1;
+        if (size > largest || (size == largest && size > 1 && ranks[i].index < *first)) {
+            largest = size;
+            *first = ranks[i].index;
+        }
+        i = end;
+    }
+
+    free(ranks);
+    return largest;
+}
+
+// Replace every file in a set with a clone (or link) of one origin. As dedup(1)
+// describes, the origin is the file with the most hard links, since it cannot
+// be replaced without breaking them; otherwise the file with the most clones,
+// so a set deduplicated before needs no changes; otherwise the first file seen
+// that is not compressed.
+static void deduplicate(DuplicateSet* set, DedupContext* ctx) {
+    Duplicate* members = set->members;
+    size_t count = set->count;
+    if (count < 2) {
+        return;
+    }
+
+    const Duplicate* origin = NULL;
+    const char* reason = NULL;
+
+    for (size_t i = 0; i < count; i++) {
+        if (members[i].nlink > 1 && (!origin || origin->nlink < members[i].nlink)) {
+            origin = &members[i];
             reason = "most hardlinks";
         }
     }
 
-    // otherwise, use the file with the most clones.
     if (!origin) {
-        rb_tree_t* clone_counts = new_clone_id_counts();
-        for (size_t i = 0; i < alist_size(metadata_set); i++) {
-            FileMetadata* fm = alist_get(metadata_set, i);
-            clone_id_tree_increment(clone_counts, fm);
-        }
+        size_t first = 0;
+        size_t clones = largest_clone_group(members, count, &first);
 
-        if (rb_tree_count(clone_counts) == 1) {
-            origin = alist_get(metadata_set, 0);
-            ctx->already_saved += origin->size * (alist_size(metadata_set) - 1);
+        if (clones == count) {
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->already_saved += members[0].size * (count - 1);
+            pthread_mutex_unlock(&ctx->metrics_mutex);
             if (ctx->verbosity) {
-                printf("%s is already cloned to\n",
-                       origin->path);
-                for (size_t i = 1; i < alist_size(metadata_set); i++) {
-                    FileMetadata* fm = alist_get(metadata_set, i);
-                    printf("\t%s\n", fm->path);
-                }
+                REPORT_LOCKED(ctx, {
+                    printf("%s is already cloned to\n", members[0].path);
+                    for (size_t i = 1; i < count; i++) {
+                        printf("\t%s\n", members[i].path);
+                    }
+                });
             }
-            free_clone_id_counts(clone_counts);
-            clone_counts = NULL;
-            return 0;
+            return;
         }
 
-        // none of the files are cloned (they all of a clone count of 1)
-        if (rb_tree_count(clone_counts) == alist_size(metadata_set)) {
-            // find the first file that is not compressed
-            //
-            // n.b.! transparently compressed files will have the UF_COMPRESSED
-            //       flag set, compressed data in the resource fork, and an
-            //       xattr named `com.apple.decmpfs`. since the data for the
-            //       file is actually stored in metadata, these files cannot
-            //       share data blocks, so they are worthless for using as
-            //       clone origins.
-            for (size_t i = 0; i < alist_size(metadata_set); i++) {
-                FileMetadata* fm = alist_get(metadata_set, i);
-                if (fm->flags & UF_COMPRESSED) {
-                    if (ctx->verbosity > 1) {
-                        printf("found a compressed file: %s\n", fm->path);
-                    }
-                    continue;
+        if (clones > 1) {
+            origin = &members[first];
+            reason = "most clones";
+        } else {
+            // n.b.! transparently compressed files (UF_COMPRESSED) keep their
+            //       data in a resource fork, so no clone can share their
+            //       blocks: they are worthless as clone origins.
+            for (size_t i = 0; i < count; i++) {
+                if (!(members[i].flags & UF_COMPRESSED)) {
+                    origin = &members[i];
+                    reason = "first seen";
+                    break;
                 }
-                origin = fm;
-                reason = "first seen";
-                break;
             }
 
             if (!origin) {
-                if (ctx->verbosity) {
-                    printf("All files in this set use HFS compression. Remove HFS compression from at least one to "
-                           "replace with clones:\n");
-                    for (size_t i = 0; i < alist_size(metadata_set); i++) {
-                        FileMetadata* fm = alist_get(metadata_set, i);
-                        printf("\t%s\n", fm->path);
-                    }
+                for (size_t i = 1; i < count; i++) {
+                    skip_duplicate(ctx, &members[i], "every copy is compressed");
                 }
-                free_clone_id_counts(clone_counts);
-                return 0;
+                return;
             }
-        } else {
-            origin = clone_id_tree_max(clone_counts);
-            reason = "most clones";
         }
-        free_clone_id_counts(clone_counts);
-        clone_counts = NULL;
     }
 
-    printf("using %s as the clone origin (%s)\n",
-           origin->path,
-           reason);
+    if (ctx->verbosity) {
+        REPORT_LOCKED(ctx, {
+            printf("using %s as the clone origin (%s)\n", origin->path, reason);
+        });
+    }
 
-    uint64_t origin_clone_id = get_clone_id(origin->path);
+    for (size_t i = 0; i < count; i++) {
+        const Duplicate* d = &members[i];
+        if (d == origin) {
+            continue;
+        }
+        display_status(ctx, d->path);
 
-    for (size_t i = 0; i < alist_size(metadata_set); i++) {
-        FileMetadata* fm = alist_get(metadata_set, i);
-
-        if (fm == origin) {
+        // Check if already deduplicated
+        if ((ctx->replace_mode == DEDUP_CLONE && d->clone_id != 0 && d->clone_id == origin->clone_id) ||
+            (ctx->replace_mode == DEDUP_LINK && d->device == origin->device && d->inode == origin->inode)) {
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->already_saved += d->size;
+            pthread_mutex_unlock(&ctx->metrics_mutex);
             continue;
         }
 
-        if (!ctx->force && fm->nlink > 1) {
-            printf("\tskipping %s, hardlinked\n",
-                   fm->path);
-            ctx->already_saved += fm->size;
+        // Skip if hardlinked and not forcing
+        if (!ctx->force && d->nlink > 1) {
+            skip_duplicate(ctx, d, "hardlinked");
             continue;
         }
 
-        if ((ctx->replace_mode == DEDUP_CLONE && fm->clone_id == origin->clone_id) ||
-            (ctx->replace_mode == DEDUP_LINK && fm->inode == origin->inode)) {
-            printf("\tskipping %s, already cloned\n",
-                   fm->path);
-            ctx->already_saved += fm->size;
-            continue;
-        }
-
-        if (fm->flags & UF_IMMUTABLE ||
-            fm->flags & SF_IMMUTABLE) {
-            printf("\tskipping %s, immutable\n",
-                   fm->path);
+        // Skip if immutable or read-only
+        if (d->flags & UF_IMMUTABLE || d->flags & SF_IMMUTABLE ||
+            (access(d->path, W_OK) != 0)) {
+            skip_duplicate(ctx, d, "immutable or not writable");
             continue;
         }
 
         if (ctx->dry_run) {
-            printf("\tcloning to %s\n",
-                   fm->path);
+            if (ctx->verbosity) {
+                REPORT_LOCKED(ctx, {
+                    printf("would deduplicate %s to %s\n", d->path, origin->path);
+                });
+            }
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->saved += d->size;
+            ctx->found++;
+            pthread_mutex_unlock(&ctx->metrics_mutex);
+            continue;
+        }
 
-            ctx->saved += fm->size;
+        // Check if clone conversion is disabled
+        if (ctx->replace_mode == DEDUP_CLONE && !ctx->clone_converted) {
+            skip_duplicate(ctx, d, "clone conversion disabled");
             continue;
         }
 
         int result = 0;
         switch (ctx->replace_mode) {
         case DEDUP_CLONE:
-            result = replace_with_clone(origin->path,
-                                        fm->path);
+            result = replace_with_clone(origin->path, d->path);
             break;
         case DEDUP_LINK:
-            result = replace_with_link(origin->path,
-                                       fm->path);
+            result = replace_with_link(origin->path, d->path);
             break;
         case DEDUP_SYMLINK:
-            result = replace_with_symlink(origin->path,
-                                          fm->path);
+            result = replace_with_symlink(origin->path, d->path);
             break;
         }
 
         if (result) {
-            perror("clone failed");
-            fprintf(stderr,
-                    "\tcould not clone %s\n",
-                    fm->path);
+            // The replace_* functions print the system error; name the
+            // file that was left alone and fail the run's exit status.
+            REPORT_LOCKED(ctx, {
+                warnx("could not replace %s with %s of %s",
+                      d->path, replacement_name(ctx->replace_mode), origin->path);
+            });
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->failed++;
+            pthread_mutex_unlock(&ctx->metrics_mutex);
             continue;
         }
 
-        printf("\tcloned to %s\n",
-               fm->path);
-
-        if (ctx->replace_mode == DEDUP_CLONE && origin_clone_id != get_clone_id(fm->path)) {
-            if (private_size(fm->path) == 0) {
-                fprintf(stderr,
-                        "\t\tclonefile(2) did not clone %s as expected, but it is a clone\n",
-                        fm->path);
-                ctx->already_saved += fm->size;
-                continue;
-            } else {
-                fprintf(stderr,
-                        "\t\tclonefile(2) did not clone %s as expected, did not report an error\n",
-                        fm->path);
-                continue;
-            }
+        if (ctx->verbosity) {
+            REPORT_LOCKED(ctx, {
+                printf("deduplicated %s\n", d->path);
+            });
         }
 
-        ctx->saved += fm->size;
-    }
+        // Verify the clone worked: a different clone id is still a clone if
+        // the file has no private data.
+        if (ctx->replace_mode == DEDUP_CLONE &&
+            get_clone_id(d->path) != origin->clone_id &&
+            private_size(d->path) != 0) {
+            // The file was replaced by a copy that shares no blocks
+            // with the origin: its data is intact but nothing was saved.
+            REPORT_LOCKED(ctx, {
+                warnx("%s was replaced, but the clone does not share blocks with %s",
+                      d->path, origin->path);
+            });
+            pthread_mutex_lock(&ctx->metrics_mutex);
+            ctx->failed++;
+            pthread_mutex_unlock(&ctx->metrics_mutex);
+            continue;
+        }
 
-    return 0;
+        pthread_mutex_lock(&ctx->metrics_mutex);
+        ctx->saved += d->size;
+        ctx->found++;
+        pthread_mutex_unlock(&ctx->metrics_mutex);
+
+        // Write clone operation to summary file (streamed)
+        if (ctx->summary_file) {
+            clone_summary_write(origin->path, d->path, d->size);
+        }
+    }
 }
 
 __attribute__((noreturn))
@@ -996,6 +1046,9 @@ int main(int argc, char* argv[]) {
         .queue = queue,
         .raw_queue = raw_queue,
         .signatures = new_sig_table(65536),
+        .sets = NULL,
+        .set_count = 0,
+        .set_capacity = 0,
         .found = 0,
         .saved = 0,
         .already_saved = 0,
@@ -1210,12 +1263,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Single-threaded seen sets (only used when thread_count == 0)
+    // Single-threaded seen set (only used when thread_count == 0)
     SeenSet* st_seen_inodes = NULL;
-    SeenSet* st_seen_clones = NULL;
     if (dc.thread_count == 0) {
         st_seen_inodes = new_seen_set(4096);
-        st_seen_clones = new_seen_set(4096);
     }
 
     dev_t current_dev = -1;
@@ -1343,7 +1394,7 @@ int main(int argc, char* argv[]) {
             dc.queued_count--;
             pthread_mutex_unlock(&dc.metrics_mutex);
             
-            if (prune_entry(fe, st_seen_inodes, st_seen_clones, &dc)) {
+            if (prune_entry(fe, st_seen_inodes, &dc)) {
                 file_entry_free(fe);
             } else {
                 // Survivor goes to work_queue (already counted in queued_count)
@@ -1410,20 +1461,23 @@ int main(int argc, char* argv[]) {
     }
     free(threads); threads = NULL;
 
+    // Every file has been compared, so each set is complete: choose its
+    // origin and replace the rest.
+    for (size_t i = 0; i < dc.set_count; i++) {
+        deduplicate(dc.sets[i], &dc);
+    }
+    free(dc.sets); dc.sets = NULL;
+
     free_seen_set(st_seen_inodes);
-    free_seen_set(st_seen_clones);
     free_file_entry_queue(raw_queue); raw_queue = NULL;
     free_file_entry_queue(queue); queue = NULL;
-    free_sig_table(dc.signatures); dc.signatures = NULL;
+    free_sig_table(dc.signatures, free_duplicate_set); dc.signatures = NULL;
 
     if (dc.progress) {
         clear_progress();
     }
     printf("duplicates found: %zu\n", dc.found);
     printf("entries pruned: %zu\n", dc.pruned);
-
-    // Fast dedup processes files immediately during traversal
-    // No additional deduplication step needed
 
     printf("bytes saved: ");
     if (human_readable) {

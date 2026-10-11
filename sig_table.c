@@ -26,7 +26,7 @@ SigTable* new_sig_table(size_t bucket_count) {
     return table;
 }
 
-void free_sig_table(SigTable* table) {
+void free_sig_table(SigTable* table, void (*free_data)(void* data)) {
     if (!table) {
         return;
     }
@@ -35,6 +35,9 @@ void free_sig_table(SigTable* table) {
         SigTableEntry* entry = table->buckets[i];
         while (entry) {
             SigTableEntry* next = entry->next;
+            if (free_data) {
+                free_data(entry->data);
+            }
             free_signature(entry->signature);
             free(entry->path);
             free(entry);
@@ -46,7 +49,7 @@ void free_sig_table(SigTable* table) {
     free(table);
 }
 
-SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char* path, uint64_t clone_id) {
+SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char* path, uint64_t clone_id, void* data) {
     if (!table || !sig || !path) {
         return NULL;
     }
@@ -73,9 +76,14 @@ SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char*
         return NULL;
     }
 
-    new_entry->signature = sig;  // Takes ownership
     new_entry->path = strdup(path);
+    if (!new_entry->path) {
+        free(new_entry);
+        return NULL;
+    }
+    new_entry->signature = sig;  // Takes ownership
     new_entry->clone_id = clone_id;
+    new_entry->data = data;      // Takes ownership
     new_entry->next = table->buckets[bucket_idx];
 
     table->buckets[bucket_idx] = new_entry;
