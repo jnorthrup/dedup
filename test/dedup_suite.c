@@ -174,6 +174,13 @@ START_TEST(dedup_help) {
     ck_assert_int_eq(1, WEXITSTATUS(r));
 } END_TEST
 
+START_TEST(dedup_ignore_refused) {
+    // -I is not implemented. Running anyway would replace files the caller
+    // asked to exclude, so dedup must refuse before touching anything.
+    int r = system("../dedup -I bar test-data/clonefile/empty");
+    ck_assert_int_eq(1, WEXITSTATUS(r));
+} END_TEST
+
 START_TEST(dedup_dry_run) {
     int r = system("../dedup -nP /Volumes/dedup-test-hfs-clonefile test-data/clonefile/bars");
     ck_assert_int_eq(0, WEXITSTATUS(r));
@@ -199,6 +206,7 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_does_not_exist);
     tcase_add_test(tc, dedup_negative_threads);
     tcase_add_test(tc, dedup_help);
+    tcase_add_test(tc, dedup_ignore_refused);
     tcase_add_test(tc, dedup_dry_run);
     tcase_add_test(tc, dedup_permission_denied);
 

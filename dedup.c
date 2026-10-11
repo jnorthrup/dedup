@@ -1022,8 +1022,9 @@ int main(int argc, char* argv[]) {
     while ((ch = getopt_long(argc, argv, "I:PVc::d:F:hlnst:vxCS:", options, NULL)) != -1) {
         switch (ch) {
             case 'I':
-                fprintf(stderr, "-I is unimplemented\n");
-                break;
+                // Exclusions are not implemented. Carrying on without them
+                // would replace the very files the caller asked to keep.
+                errx(1, "-I/--ignore is not implemented; refusing to run");
             case 'P':
                 dc.progress = NULL;
                 break;
