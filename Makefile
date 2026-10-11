@@ -37,6 +37,7 @@ OBJECTS = \
     alist.o \
     backend.o \
     clone.o \
+    extent_map.o \
     progress.o \
     queue.o \
     seen_set.o \
@@ -123,7 +124,7 @@ check-test: check-build
 	cd test && make check
 check: check-test tidy check-spelling
 
-check-linux:
+check-linux: dedup
 	cd test && $(MAKE) check-linux
 
 clean-coverage:

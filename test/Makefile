@@ -4,14 +4,13 @@ CFLAGS += \
     -Wall -Wextra -Werror -pedantic \
     -Wpointer-arith \
     -Wno-unused-parameter \
-    -Wp,-D_FORTIFY_SOURCE=2 \
+    -Wp,-D_FORTIFY_SOURCE=3 \
     -fexceptions \
     -fpic \
     -fprofile-arcs \
     -Wno-macro-redefined \
     --param=ssp-buffer-size=4  \
     -grecord-gcc-switches \
-    -m64 \
     -ftrapv \
     -pipe \
     -ftest-coverage \
@@ -25,6 +24,20 @@ CFLAGS += \
 
 LDFLAGS += \
     -L/opt/homebrew/lib
+
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Darwin)
+CFLAGS += -m64
+CHECK_OBJECTS = dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o extent_map_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o extent_map_test.o
+CHECK_LIBS = -lcheck
+else
+# Strict -std=c2x hides POSIX from glibc's headers (mkdtemp, PATH_MAX).
+CFLAGS += -D_DEFAULT_SOURCE
+# The suites that need neither APFS nor disk images.
+CHECK_OBJECTS = dedup_check.o signature_suite.o runtime_dispatch_suite.o extent_map_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o signature_test.o extent_map_test.o
+CHECK_LIBS = $(shell pkg-config --libs check 2>/dev/null || echo -lcheck)
+endif
 
 .PHONY: \
 	check check-linux \
@@ -41,46 +54,23 @@ check: dedup_check setup-all
 	hdiutil detach /Volumes/dedup-test-hfs-link
 	hdiutil detach /Volumes/dedup-test-hfs-symlink
 
-# Linux CI target: uses tmpfs/scratch dirs, no mount privileges needed.
-# Clone/HFS suites skipped unless running as root with btrfs loop device.
-# Symlink+link suites are the primary gates.
-check-linux: dedup_check setup-linux
-	./dedup_check --suite dedup_symlink
-	./dedup_check --suite dedup_link
-	@if [ "$(shell id -u)" = "0" ] && losetup -f >/dev/null 2>&1; then \
-		echo "root + loop available — running clone suite"; \
-		./dedup_check --suite dedup; \
+# Linux: the portable suites, then the filesystem tests, which loop-mount
+# btrfs, XFS and ext4 images and so need root.
+check-linux: dedup_check
+	./dedup_check
+	@if [ "$$(id -u)" = 0 ]; then \
+		./linux_fs_check.sh ../dedup; \
 	else \
-		echo "skipping clone suite (needs root + loop btrfs)"; \
+		echo "skipping the filesystem tests: they need root to loop-mount test filesystems"; \
 	fi
-	rm -rf test-data-linux
 
-setup-linux:
-	rm -rf test-data-linux
-	mkdir -p test-data-linux/{bars,empty,big,same-size,same-first-last}
-	# "bar" test data
-	cd test-data-linux/bars && echo "foo" > bar && cp bar bar2 && ln bar bar3 && cp bar bar4 && cp bar bar5
-	# "empty" test data
-	cd test-data-linux/empty && touch empty && touch empty2
-	# "big" test data
-	dd if=/dev/urandom of=test-data-linux/big/big bs=1M count=4 2>/dev/null
-	dd if=/dev/urandom of=test-data-linux/big/big2 bs=1M count=4 2>/dev/null
-	# "same-size" test data
-	dd if=/dev/zero of=test-data-linux/same-size/big bs=1M count=1 2>/dev/null
-	dd if=/dev/zero of=test-data-linux/same-size/big2 bs=1M count=1 2>/dev/null
-	# "same-first-last" test data
-	dd if=/dev/urandom of=test-data-linux/same-first-last/big bs=1M count=4 2>/dev/null
-	dd if=/dev/urandom of=test-data-linux/same-first-last/big2 bs=1M count=4 2>/dev/null
-	echo "a" > test-data-linux/same-first-last/same-1
-	cat test-data-linux/same-first-last/big >> test-data-linux/same-first-last/same-1
-	echo "z" >> test-data-linux/same-first-last/same-1
-	echo "a" > test-data-linux/same-first-last/same-2
-	cat test-data-linux/same-first-last/big2 >> test-data-linux/same-first-last/same-2
-	echo "z" >> test-data-linux/same-first-last/same-2
-
-dedup_check: dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o
+dedup_check: $(CHECK_OBJECTS)
 	rm -f dedup_check.gcda dedup_check.gcno
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ -l check $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(CHECK_LIBS)
+
+extent_map_test.o: ../extent_map.c ../extent_map.h
+	rm -f extent_map_test.gcda extent_map_test.gcno
+	$(CC) $(CFLAGS) -c -o $@ ../extent_map.c
 
 alist_test.o: ../alist.c ../alist.h
 	rm -f alist_test.gcda alist_test.gcno

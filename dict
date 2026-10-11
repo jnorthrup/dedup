@@ -54,3 +54,9 @@ userspace
 vectorized
 xfs
 xxHash
+filesystems
+tmpfs
+xfsprogs
+deduplicates
+FIDEDUPERANGE
+fideduperange

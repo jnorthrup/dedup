@@ -58,7 +58,9 @@ START_TEST(dedup_detects_small_duplicate_files) {
     write_bytes(a, "A", 1);
     write_bytes(b, "A", 1);
 
-    snprintf(cmd, sizeof(cmd), "../dedup -nP %s", dir);
+    // a dry run in link mode: detection is the same in every mode, and
+    // clone mode would depend on whether /tmp can share blocks
+    snprintf(cmd, sizeof(cmd), "../dedup -nlP %s", dir);
     char* output = run(cmd);
     ck_assert_ptr_nonnull(strstr(output, "duplicates found: 1\n"));
     ck_assert_ptr_nonnull(strstr(output, "bytes saved: 1 bytes\n"));
@@ -92,7 +94,9 @@ START_TEST(dedup_rejects_sample_only_signature_collisions) {
     free(file_a);
     free(file_b);
 
-    snprintf(cmd, sizeof(cmd), "../dedup -nP %s", dir);
+    // a dry run in link mode: detection is the same in every mode, and
+    // clone mode would depend on whether /tmp can share blocks
+    snprintf(cmd, sizeof(cmd), "../dedup -nlP %s", dir);
     char* output = run(cmd);
     ck_assert_ptr_nonnull(strstr(output, "duplicates found: 0\n"));
     ck_assert_ptr_nonnull(strstr(output, "bytes saved: 0 bytes\n"));

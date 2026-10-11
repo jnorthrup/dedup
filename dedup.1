@@ -91,6 +91,22 @@ will only work on volumes that have the
 .Ar VOL_CAP_INT_CLONE
 capability. Currently that is limited to APFS.
 .Pp
+On Linux,
+.Nm
+does not replace duplicates. It asks the kernel to share each duplicate's
+blocks with the other file in place, using the
+.Dv FIDEDUPERANGE
+ioctl, on filesystems that can share blocks, such as btrfs and XFS created
+with reflink support. The kernel compares both files first and leaves them
+alone if they differ. The duplicate keeps its inode, and with it its owner,
+permissions, timestamps, extended attributes, ACLs and hard links, so files
+with several hard links are deduplicated too. btrfs keeps small files inline
+with metadata, where they cannot be shared; they are skipped. Each filesystem
+is asked once whether it can share blocks; files on filesystems that cannot,
+such as ext4 and tmpfs, are skipped with a warning. The question cannot tell
+whether XFS was created with reflink support; without it, each duplicate
+fails.
+.Pp
 While
 .Nm
 is primarily intended to be used to save storage by using clones, it also
@@ -194,6 +210,7 @@ option to reduce the archive size.
 .Sh SEE ALSO
 .Xr clonefile 2 ,
 .Xr copyfile 3 ,
+.Xr ioctl_fideduperange 2 ,
 .Xr link 2 ,
 .Xr symlink 2
 .Sh STANDARDS
@@ -212,3 +229,5 @@ the same permissions, metadata, and ACLs. Support for copying metadata comes
 from
 .Xr copyfile 3
 .
+On Linux, clone mode deduplicates files in place rather than replacing them,
+so their metadata is not touched.

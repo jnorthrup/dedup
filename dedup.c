@@ -53,6 +53,7 @@ static char sccsid[] = "@(#)dedup.c)";
 #endif
 
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <err.h>
@@ -392,6 +393,67 @@ static void skip_duplicate(DedupContext* ctx, const FileEntry* fe, const char* r
     pthread_mutex_unlock(&ctx->metrics_mutex);
 }
 
+// Whether clone mode keeps the duplicate's inode (see DEDUP_IN_PLACE).
+static bool dedupes_in_place(const DedupContext* ctx) {
+#if defined(DEDUP_IN_PLACE)
+    return ctx->replace_mode == DEDUP_CLONE;
+#else
+    (void)ctx;
+    return false;
+#endif
+}
+
+#if defined(DEDUP_IN_PLACE)
+// Shares the origin's blocks with the duplicate in place and accounts for
+// the outcome. Only blocks seen to be shared afterwards count as saved.
+static void dedupe_duplicate_in_place(DedupContext* ctx, const FileEntry* fe,
+                                      const SigTableEntry* existing) {
+    DedupeResult result = dedupe_in_place(existing->path, fe->path, fe->size);
+    if (result == DEDUPE_DIFFERS) {
+        skip_duplicate(ctx, fe, "changed since it was compared");
+        return;
+    }
+
+    if (result == DEDUPE_FAILED) {
+        int error = errno;
+        REPORT_LOCKED(ctx, {
+            errno = error;
+            warn("could not deduplicate %s with %s", fe->path, existing->path);
+        });
+        pthread_mutex_lock(&ctx->metrics_mutex);
+        ctx->failed++;
+        pthread_mutex_unlock(&ctx->metrics_mutex);
+        return;
+    }
+
+    if (share_state(existing->path, fe->path, fe->size) != SHARE_SHARED) {
+        REPORT_LOCKED(ctx, {
+            warnx("%s was deduplicated, but does not share blocks with %s",
+                  fe->path, existing->path);
+        });
+        pthread_mutex_lock(&ctx->metrics_mutex);
+        ctx->failed++;
+        pthread_mutex_unlock(&ctx->metrics_mutex);
+        return;
+    }
+
+    if (ctx->verbosity) {
+        REPORT_LOCKED(ctx, {
+            printf("deduplicated %s\n", fe->path);
+        });
+    }
+
+    pthread_mutex_lock(&ctx->metrics_mutex);
+    ctx->saved += fe->size;
+    ctx->found++;
+    pthread_mutex_unlock(&ctx->metrics_mutex);
+
+    if (ctx->summary_file) {
+        clone_summary_write(existing->path, fe->path, fe->size);
+    }
+}
+#endif
+
 void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
     if (!fe || !ctx) {
         return;
@@ -435,12 +497,32 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Found a duplicate
         display_status(ctx, fe->path);
 
-        // Check if already deduplicated. A clone id of 0 means it could not
-        // be read (or the platform has none), which proves nothing.
-        uint64_t current_clone_id = get_clone_id(fe->path);
-        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id != 0 &&
-             current_clone_id == existing->clone_id) ||
-            (ctx->replace_mode == DEDUP_LINK && fe->inode == get_inode(existing->path))) {
+        // Check if already deduplicated
+        bool already_deduplicated = false;
+        if (ctx->replace_mode == DEDUP_CLONE) {
+#if defined(DEDUP_IN_PLACE)
+            ShareState state = share_state(existing->path, fe->path, fe->size);
+            if (state == SHARE_INLINE || state == SHARE_UNKNOWN) {
+                skip_duplicate(ctx, fe, state == SHARE_INLINE
+                                        ? "data stored inline, cannot be shared"
+                                        : "could not read its extent map");
+                free_signature(sig);
+                visit_order_end(ctx);
+                return;
+            }
+            already_deduplicated = (state == SHARE_SHARED);
+#else
+            // A clone id of 0 means it could not be read (or the platform
+            // has none), which proves nothing.
+            uint64_t current_clone_id = get_clone_id(fe->path);
+            already_deduplicated = current_clone_id != 0 &&
+                                   current_clone_id == existing->clone_id;
+#endif
+        } else if (ctx->replace_mode == DEDUP_LINK) {
+            already_deduplicated = (fe->inode == get_inode(existing->path));
+        }
+
+        if (already_deduplicated) {
             pthread_mutex_lock(&ctx->metrics_mutex);
             ctx->already_saved += fe->size;
             pthread_mutex_unlock(&ctx->metrics_mutex);
@@ -449,8 +531,9 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             return;
         }
 
-        // Skip if hardlinked and not forcing
-        if (!ctx->force && fe->nlink > 1) {
+        // Skip if hardlinked and not forcing: replacing one name would split
+        // it from the others. Deduplicating in place keeps every name.
+        if (!ctx->force && fe->nlink > 1 && !dedupes_in_place(ctx)) {
             skip_duplicate(ctx, fe, "hardlinked");
             free_signature(sig);
             visit_order_end(ctx);
@@ -485,6 +568,15 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                 visit_order_end(ctx);
                 return;
             }
+
+#if defined(DEDUP_IN_PLACE)
+            if (ctx->replace_mode == DEDUP_CLONE) {
+                dedupe_duplicate_in_place(ctx, fe, existing);
+                free_signature(sig);
+                visit_order_end(ctx);
+                return;
+            }
+#endif
             
             int result = 0;
             switch (ctx->replace_mode) {
@@ -996,8 +1088,8 @@ bool is_clonefile_supported(char* path) {
     return is_vol_cap_supported(path, VOL_CAP_INT_CLONE);
 #else
     // Clone-and-rename cannot carry ownership, timestamps or xattrs over to
-    // the replacement here, so clone mode is unavailable until files can be
-    // deduplicated in place.
+    // the replacement here. In-place builds (DEDUP_IN_PLACE) do not call
+    // this; they ask each filesystem with dedupe_supported() instead.
     (void)path;
     return false;
 #endif
@@ -1267,6 +1359,7 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+#if !defined(DEDUP_IN_PLACE)
         if (dc.replace_mode == DEDUP_CLONE &&
             current_dev != entry->fts_statp->st_dev) {
             current_dev = entry->fts_statp->st_dev;
@@ -1290,6 +1383,7 @@ int main(int argc, char* argv[]) {
             !clonefile_supported) {
             continue;
         }
+#endif
 
         // the file cannot be a directory
         if (entry->fts_info == FTS_D ||
@@ -1334,6 +1428,34 @@ int main(int argc, char* argv[]) {
         if (strstr(entry->fts_path, "/PhotoData/Caches/")) {
             continue;
         }
+
+#if defined(DEDUP_IN_PLACE)
+        // FIDEDUPERANGE can only be asked about a regular file, so decide at
+        // the first candidate on each filesystem. A file that cannot answer
+        // (unreadable, say) goes through, and the next one is asked.
+        if (dc.replace_mode == DEDUP_CLONE &&
+            current_dev != entry->fts_statp->st_dev) {
+            int supported = dedupe_supported(entry->fts_path);
+            if (supported >= 0) {
+                current_dev = entry->fts_statp->st_dev;
+                clonefile_supported = (supported == 1);
+                if (!clonefile_supported) {
+                    REPORT_LOCKED(&dc, {
+                        warnx("Skipping %s and the rest of its filesystem: cloning not supported",
+                              entry->fts_path);
+                    });
+                }
+            } else {
+                current_dev = (dev_t)-1;
+                clonefile_supported = true;
+            }
+        }
+
+        if (dc.replace_mode == DEDUP_CLONE &&
+            !clonefile_supported) {
+            continue;
+        }
+#endif
 
         // at this point we have a regular file
         // that only has one link

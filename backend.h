@@ -5,11 +5,19 @@
 #ifndef __DEDUP_BACKEND_H__
 #define __DEDUP_BACKEND_H__
 
+#if defined(__linux__) && !defined(HAVE_UBT)
+/// Clone mode deduplicates in place with the FIDEDUPERANGE ioctl. The
+/// kernel compares the files under lock and shares the origin's blocks with
+/// the duplicate, which keeps its inode: ownership, permissions, timestamps,
+/// extended attributes and hard links are untouched.
+#define DEDUP_IN_PLACE 1
+#endif
+
 typedef enum CloneBackend {
-    BACKEND_AUTO     = 0,
-    BACKEND_CLONEFILE = 1,  /* macOS clonefile(2) */
-    BACKEND_FICLONE  = 2,  /* Linux FICLONE ioctl */
-    BACKEND_UBT      = 3,  /* userspace BTRFS (future) */
+    BACKEND_AUTO          = 0,
+    BACKEND_CLONEFILE     = 1,  /* macOS clonefile(2) */
+    BACKEND_FIDEDUPERANGE = 2,  /* Linux FIDEDUPERANGE ioctl, in place */
+    BACKEND_UBT           = 3,  /* userspace BTRFS (future) */
 } CloneBackend;
 
 /// backend_init
