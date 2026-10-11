@@ -148,6 +148,15 @@ typedef enum ReplaceMode {
     DEDUP_SYMLINK  = 2,
 } ReplaceMode;
 
+static const char* replacement_name(ReplaceMode mode) {
+    switch (mode) {
+    case DEDUP_LINK:    return "a hard link";
+    case DEDUP_SYMLINK: return "a symbolic link";
+    case DEDUP_CLONE:   break;
+    }
+    return "a clone";
+}
+
 typedef struct DedupContext {
     Progress* progress;
     FileEntryHead* queue;
@@ -157,6 +166,7 @@ typedef struct DedupContext {
     size_t saved;
     size_t already_saved;
     size_t pruned;
+    size_t failed;       // Duplicates that could not be replaced
     size_t total_bytes;  // Accumulated bytes of all scanned files
     size_t queued_count; // Entries in raw_queue + work_queue combined
     uint64_t next_file_sequence;
@@ -468,7 +478,15 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             }
 
             if (result) {
-                // Silently skip clone failures (permissions, filesystem issues, etc)
+                // The replace_* functions print the system error; name the
+                // file that was left alone and fail the run's exit status.
+                REPORT_LOCKED(ctx, {
+                    warnx("could not replace %s with %s of %s",
+                          fe->path, replacement_name(ctx->replace_mode), existing->path);
+                });
+                pthread_mutex_lock(&ctx->metrics_mutex);
+                ctx->failed++;
+                pthread_mutex_unlock(&ctx->metrics_mutex);
                 free_signature(sig);
                 visit_order_end(ctx);
                 return;
@@ -501,8 +519,14 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                         clone_summary_write(existing->path, fe->path, fe->size);
                     }
                 } else {
+                    // The file was replaced by a copy that shares no blocks
+                    // with the origin: its data is intact but nothing was saved.
+                    REPORT_LOCKED(ctx, {
+                        warnx("%s was replaced, but the clone does not share blocks with %s",
+                              fe->path, existing->path);
+                    });
                     pthread_mutex_lock(&ctx->metrics_mutex);
-                    ctx->already_saved += fe->size; // Count as already saved to avoid double counting
+                    ctx->failed++;
                     pthread_mutex_unlock(&ctx->metrics_mutex);
                 }
             }
@@ -971,6 +995,7 @@ int main(int argc, char* argv[]) {
         .saved = 0,
         .already_saved = 0,
         .pruned = 0,
+        .failed = 0,
         .total_bytes = 0,
         .queued_count = 0,
         .next_file_sequence = 0,
@@ -1397,6 +1422,10 @@ int main(int argc, char* argv[]) {
     }
     putchar('\n');
 
+    if (dc.failed) {
+        printf("replacements failed: %zu\n", dc.failed);
+    }
+
     // Clear status line
     if (isatty(STDOUT_FILENO)) {
         fprintf(stderr, "\r\033[K\n");
@@ -1407,5 +1436,7 @@ int main(int argc, char* argv[]) {
         clone_summary_close();
     }
 
-    return 0;
+    // Each failure was reported when it happened; the status tells scripts
+    // that some duplicates were left in place.
+    return dc.failed ? 1 : 0;
 }

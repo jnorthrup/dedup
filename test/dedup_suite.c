@@ -204,6 +204,27 @@ START_TEST(dedup_permission_denied) {
     free(output);
 } END_TEST
 
+START_TEST(dedup_failed_replacement_exit_status) {
+    // A duplicate in a directory that is not writable cannot be replaced. The
+    // run must name it, count it, and exit nonzero.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/readonly-dir"
+                               " && printf locked > test-data/clonefile/readonly-dir/a"
+                               " && cp test-data/clonefile/readonly-dir/a test-data/clonefile/readonly-dir/b"
+                               " && chmod 555 test-data/clonefile/readonly-dir"));
+    char output[2048] = { 0 };
+    FILE* pout = popen("../dedup -P test-data/clonefile/readonly-dir 2>&1", "r");
+    ck_assert_ptr_nonnull(pout);
+    size_t read = fread(output, 1, sizeof(output) - 1, pout);
+    int r = pclose(pout);
+    // restore first, so the fixture can be removed even if an assertion fails
+    ck_assert_int_eq(0, system("chmod 755 test-data/clonefile/readonly-dir"));
+
+    ck_assert_uint_gt(read, 0);
+    ck_assert_int_eq(1, WEXITSTATUS(r));
+    ck_assert_ptr_nonnull(strstr(output, "could not replace test-data/clonefile/readonly-dir/"));
+    ck_assert_ptr_nonnull(strstr(output, "replacements failed: 1\n"));
+} END_TEST
+
 Suite* dedup_suite() {
     TCase* tc = tcase_create("dedup");
     tcase_add_test(tc, dedup_empty);
@@ -221,6 +242,7 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_dry_run);
     tcase_add_test(tc, dedup_dry_run_reports_without_terminal);
     tcase_add_test(tc, dedup_permission_denied);
+    tcase_add_test(tc, dedup_failed_replacement_exit_status);
 
     Suite* s = suite_create("dedup");
     suite_add_tcase(s, tc);

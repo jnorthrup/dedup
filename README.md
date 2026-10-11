@@ -156,7 +156,10 @@ The following options are available:
 
 # EXIT STATUS
 
-The **dedup** utility exits 0 on success and &gt;0 if an error occurs.
+The **dedup** utility exits 0 on success and &gt;0 if an error occurs. Each
+duplicate that could not be replaced is reported as it happens, the summary
+counts them (`replacements failed`), and the exit status is 1. Files and
+directories that cannot be read are reported but do not change the exit status.
 
 It is possible that during abnormal termination a temporary clone will be left
 before it is moved to the path it is replacing. In such cases a file with the
