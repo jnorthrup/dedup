@@ -1127,6 +1127,10 @@ int main(int argc, char* argv[]) {
     // Initialize clone backend
     CloneBackend backend = backend_init();
 
+    // Settle the runtime capabilities and dispatch table here, before any
+    // worker thread starts, so the startup benchmarks run exactly once.
+    (void)dedup_runtime_dispatch_get();
+
     // Print verbose runtime information if requested
     if (dc.verbosity > 0) {
         printf("clone backend: %s\n", backend_name(backend));

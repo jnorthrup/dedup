@@ -6,6 +6,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +17,9 @@
 #include "signature.h"
 
 static DedupRuntimeDispatch g_runtime_dispatch;
-static bool g_runtime_dispatch_initialized = false;
+// Initialized once, by whichever thread asks first (see runtime_caps.c).
+static atomic_bool g_runtime_dispatch_initialized = false;
+static pthread_mutex_t g_runtime_dispatch_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t fast_hash_xxhash_backend(const void* data, size_t len) {
     return signature_fast_hash_bytes(data, len);
@@ -205,7 +209,12 @@ static dedup_exact_compare_fn exact_backend_for_name(const char* name) {
 }
 
 const DedupRuntimeDispatch* dedup_runtime_dispatch_get(void) {
-    if (!g_runtime_dispatch_initialized) {
+    if (atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_acquire)) {
+        return &g_runtime_dispatch;
+    }
+
+    pthread_mutex_lock(&g_runtime_dispatch_mutex);
+    if (!atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_relaxed)) {
         static const char* const fast_hash_names[] = { "xxhash", "rapidhash", "komihash", "blake3" };
         static const char* const strong_hash_names[] = { "none", "blake3", "sha3", "pmull_poly" };
         static const char* const witness_names[] = { "none", "cpu_witness", "gpu_witness_stream" };
@@ -279,8 +288,9 @@ const DedupRuntimeDispatch* dedup_runtime_dispatch_get(void) {
             g_runtime_dispatch.witness_name = "gpu_witness_stream";
         }
 
-        g_runtime_dispatch_initialized = true;
+        atomic_store_explicit(&g_runtime_dispatch_initialized, true, memory_order_release);
     }
+    pthread_mutex_unlock(&g_runtime_dispatch_mutex);
 
     return &g_runtime_dispatch;
 }
@@ -316,8 +326,10 @@ bool dedup_runtime_exact_compare(const char* a_path, const char* b_path, uint64_
 }
 
 void dedup_runtime_dispatch_reset_for_tests(void) {
+    pthread_mutex_lock(&g_runtime_dispatch_mutex);
     memset(&g_runtime_dispatch, 0, sizeof(g_runtime_dispatch));
-    g_runtime_dispatch_initialized = false;
+    atomic_store_explicit(&g_runtime_dispatch_initialized, false, memory_order_release);
+    pthread_mutex_unlock(&g_runtime_dispatch_mutex);
 }
 
 void dedup_runtime_dispatch_print_verbose(void) {
