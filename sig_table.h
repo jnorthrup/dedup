@@ -20,6 +20,7 @@ typedef struct SigTableEntry {
 typedef struct SigTable {
     SigTableEntry** buckets;
     size_t bucket_count;
+    size_t mask;         // bucket_count - 1 (cached for fast bitwise indexing)
     size_t entry_count;
 } SigTable;
 
