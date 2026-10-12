@@ -8,7 +8,23 @@
 
 #include "runtime_dispatch.h"
 
+static size_t next_power_of_2(size_t v) {
+    if (v == 0) return 1;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v |= v >> 32;
+    v++;
+    return v;
+}
+
 SigTable* new_sig_table(size_t bucket_count) {
+    if (bucket_count < 16) bucket_count = 16;
+    bucket_count = next_power_of_2(bucket_count);
+
     SigTable* table = calloc(1, sizeof(SigTable));
     if (!table) {
         return NULL;
@@ -21,6 +37,7 @@ SigTable* new_sig_table(size_t bucket_count) {
     }
 
     table->bucket_count = bucket_count;
+    table->mask = bucket_count - 1;
     table->entry_count = 0;
 
     return table;
@@ -52,7 +69,7 @@ SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char*
     }
 
     uint64_t hash = hash_signature(sig);
-    size_t bucket_idx = hash % table->bucket_count;
+    size_t bucket_idx = hash & table->mask;
 
     // Check for existing match in collision chain.
     // SMHasher-style discipline: a fast hash/signature only nominates candidates;

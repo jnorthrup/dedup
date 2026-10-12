@@ -39,7 +39,9 @@ typedef struct {
 
 struct SeenSet {
     Slot*  slots;
-    size_t capacity; // always a power of 2
+    size_t capacity;  // always a power of 2
+    size_t mask;      // capacity - 1 (cached for fast indexing)
+    size_t max_count; // threshold (75% of capacity) for growing
     size_t count;
 };
 
@@ -69,6 +71,8 @@ SeenSet* new_seen_set(size_t capacity) {
     }
 
     set->capacity = capacity;
+    set->mask = capacity - 1;
+    set->max_count = (capacity * 3) / 4;
     set->count = 0;
     return set;
 }
@@ -104,16 +108,19 @@ static bool seen_set_grow(SeenSet* set) {
     free(set->slots);
     set->slots = new_slots;
     set->capacity = new_cap;
+    set->mask = mask;
+    set->max_count = (new_cap * 3) / 4;
     return true;
 }
 
 bool seen_set_insert(SeenSet* set, uint64_t key) {
-    // Grow at 75% load
-    if (set->count * 4 >= set->capacity * 3) {
+    // Grow at 75% load using pre-calculated max_count threshold
+    if (set->count >= set->max_count) {
         seen_set_grow(set);
     }
 
-    size_t mask = set->capacity - 1;
+    // Performance optimization: use cached mask (capacity - 1)
+    size_t mask = set->mask;
     size_t idx = hash_key(key, mask);
 
     while (set->slots[idx].state == OCCUPIED) {
