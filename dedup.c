@@ -275,6 +275,10 @@ static void display_status(DedupContext* ctx, const char* path) {
     if (path_max < 10) path_max = 10;
     
     char truncated_path[256];
+    // Security check: cap path_max to truncated_path buffer capacity to prevent stack buffer overflow on wide terminals
+    if (path_max > (int)sizeof(truncated_path) - 1) {
+        path_max = (int)sizeof(truncated_path) - 1;
+    }
     memset(truncated_path, 0, sizeof(truncated_path));
     if (path) {
         size_t len = strlen(path);
