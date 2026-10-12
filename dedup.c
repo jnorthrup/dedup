@@ -848,7 +848,7 @@ static void usage(char* pgm, DedupContext* ctx) {
                 "  --dry-run, -n            Don't replace file content, just print what \n"
                 "                           would have happend.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
-                "  --format, -F format      Output format for byte sizes. See --help formats.\n"
+                "  --format, -F format      Output format for byte sizes. Use '-F formats' to list formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
                 "                           than the starting paths.\n"
                 "  --link, -l               Use hardlinks instead of clones.\n"
@@ -1043,6 +1043,10 @@ int main(int argc, char* argv[]) {
                 max_depth = d;
                 break;
             case 'F':
+                if (strcmp(optarg, "formats") == 0 || strcmp(optarg, "help") == 0) {
+                    list_available_formats(stdout);
+                    exit(0);
+                }
                 dc.output_format = parse_output_format(optarg);
                 break;
             case 'h':
