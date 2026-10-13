@@ -52,7 +52,14 @@ SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char*
     }
 
     uint64_t hash = hash_signature(sig);
-    size_t bucket_idx = hash % table->bucket_count;
+    // Bolt Optimization: Avoid expensive 64-bit integer division (%) on every insertion
+    // by using fast bitwise AND when bucket_count is a power of 2 (e.g. default 65536).
+    size_t bucket_idx;
+    if (table->bucket_count > 0 && (table->bucket_count & (table->bucket_count - 1)) == 0) {
+        bucket_idx = (size_t)(hash & (table->bucket_count - 1));
+    } else {
+        bucket_idx = hash % table->bucket_count;
+    }
 
     // Check for existing match in collision chain.
     // SMHasher-style discipline: a fast hash/signature only nominates candidates;
