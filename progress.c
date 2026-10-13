@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 #include "progress.h"
 
@@ -35,10 +36,18 @@
 
 void display_progress(const Progress* progress) {
     struct winsize w;
-    ioctl(0, TIOCGWINSZ, &w);
+    memset(&w, 0, sizeof(w));
+    size_t cols = 80;
+    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
+        cols = w.ws_col;
+    }
 
-    size_t width = w.ws_col - 23 - (progress->note ? strlen(progress->note) : 6);
+    size_t note_len = progress->note ? strlen(progress->note) : 6;
+    size_t overhead = 23 + note_len;
+
+    size_t width = (cols > overhead) ? (cols - overhead) : 10;
     width = MIN(width, 80);
+    width = MAX(width, 10);
 
     clear_progress();
     fputc('[', stderr);

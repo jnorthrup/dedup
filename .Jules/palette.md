@@ -1,0 +1,3 @@
+## 2026-10-13 - Safe CLI Progress Bar Bounds & Stream Querying
+**Learning:** When querying terminal window dimensions using `ioctl(..., TIOCGWINSZ, &w)`, query the stream where the output is actually written (e.g., `STDERR_FILENO` instead of `0`/stdin). Always protect against `ioctl` failure and integer underflow when calculating column width subtractions (`cols - overhead`), clamping progress bar width to safe bounds (`[10, 80]`).
+**Action:** When rendering progress bars or terminal UI layouts in C/POSIX CLIs, ensure `STDERR_FILENO` is queried, `ioctl` return values are validated, and string overhead subtractions use ternary bounds guards.
