@@ -846,7 +846,7 @@ static void usage(char* pgm, DedupContext* ctx) {
                 // "                           source or being replaced by a clone. This option\n"
                 // "                           can be specified multiple times.\n"
                 "  --dry-run, -n            Don't replace file content, just print what \n"
-                "                           would have happend.\n"
+                "                           would have happened.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
                 "  --format, -F format      Output format for byte sizes. See --help formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
