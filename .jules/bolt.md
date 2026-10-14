@@ -1,0 +1,3 @@
+## 2026-10-14 - SeenSet Hash Table Memory Layout Optimization
+**Learning:** In C hash table structures with 64-bit integer keys (e.g. inode/device keys), storing a 1-byte state enum inside each slot struct causes compiler alignment padding to expand each slot from 9 bytes to 16 bytes. By using `0ULL` as an empty slot sentinel and tracking key `0` out-of-band via a boolean flag, the layout flattens to a `uint64_t[]` array, reducing slot memory footprint by 50% (from 16B to 8B) and doubling L1/L2 cache line density during linear probing.
+**Action:** When designing open-addressing hash sets for integer keys, check struct alignment padding and prefer a 0-sentinel + out-of-band zero flag over a separate state member.
