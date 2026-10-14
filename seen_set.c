@@ -29,21 +29,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define EMPTY    0
-#define OCCUPIED 1
+#define EMPTY_KEY 0ULL
 
-typedef struct {
-    uint64_t key;
-    uint8_t  state;
-} Slot;
-
+// Bolt Optimization:
+// Flatten the hash table array from `Slot` structs (16 bytes due to alignment padding)
+// to a contiguous uint64_t array (8 bytes per entry). Empty slots are represented
+// by EMPTY_KEY (0ULL). The `has_zero` flag tracks whether key 0 itself has been inserted.
+// This reduces the memory footprint per slot by 50% (doubling L1/L2 cache line efficiency)
+// and avoids branching on `state` bytes during linear probing.
 struct SeenSet {
-    Slot*  slots;
-    size_t capacity; // always a power of 2
-    size_t count;
+    uint64_t* keys;
+    size_t    capacity; // always a power of 2
+    size_t    count;
+    bool      has_zero;
 };
 
 static size_t next_power_of_2(size_t v) {
+    if (v < 16) return 16;
     v--;
     v |= v >> 1;
     v |= v >> 2;
@@ -56,26 +58,26 @@ static size_t next_power_of_2(size_t v) {
 }
 
 SeenSet* new_seen_set(size_t capacity) {
-    if (capacity < 16) capacity = 16;
     capacity = next_power_of_2(capacity);
 
     SeenSet* set = malloc(sizeof(SeenSet));
     if (!set) return NULL;
 
-    set->slots = calloc(capacity, sizeof(Slot));
-    if (!set->slots) {
+    set->keys = calloc(capacity, sizeof(uint64_t));
+    if (!set->keys) {
         free(set);
         return NULL;
     }
 
     set->capacity = capacity;
     set->count = 0;
+    set->has_zero = false;
     return set;
 }
 
 void free_seen_set(SeenSet* set) {
     if (!set) return;
-    free(set->slots);
+    free(set->keys);
     free(set);
 }
 
@@ -86,45 +88,55 @@ static inline size_t hash_key(uint64_t key, size_t mask) {
 
 static bool seen_set_grow(SeenSet* set) {
     size_t new_cap = set->capacity * 2;
-    Slot* new_slots = calloc(new_cap, sizeof(Slot));
-    if (!new_slots) return false;
+    uint64_t* new_keys = calloc(new_cap, sizeof(uint64_t));
+    if (!new_keys) return false;
 
     size_t mask = new_cap - 1;
     for (size_t i = 0; i < set->capacity; i++) {
-        if (set->slots[i].state != OCCUPIED) continue;
-        uint64_t key = set->slots[i].key;
+        uint64_t key = set->keys[i];
+        if (key == EMPTY_KEY) continue;
         size_t idx = hash_key(key, mask);
-        while (new_slots[idx].state == OCCUPIED) {
+        while (new_keys[idx] != EMPTY_KEY) {
             idx = (idx + 1) & mask;
         }
-        new_slots[idx].key = key;
-        new_slots[idx].state = OCCUPIED;
+        new_keys[idx] = key;
     }
 
-    free(set->slots);
-    set->slots = new_slots;
+    free(set->keys);
+    set->keys = new_keys;
     set->capacity = new_cap;
     return true;
 }
 
 bool seen_set_insert(SeenSet* set, uint64_t key) {
+    // Handle 0 key out-of-band so EMPTY_KEY (0) can act as sentinel for empty slot
+    if (key == EMPTY_KEY) {
+        if (set->has_zero) {
+            return true; // already present
+        }
+        set->has_zero = true;
+        set->count++;
+        return false; // newly inserted
+    }
+
     // Grow at 75% load
     if (set->count * 4 >= set->capacity * 3) {
-        seen_set_grow(set);
+        if (!seen_set_grow(set)) {
+            return false;
+        }
     }
 
     size_t mask = set->capacity - 1;
     size_t idx = hash_key(key, mask);
 
-    while (set->slots[idx].state == OCCUPIED) {
-        if (set->slots[idx].key == key) {
+    while (set->keys[idx] != EMPTY_KEY) {
+        if (set->keys[idx] == key) {
             return true; // already present
         }
         idx = (idx + 1) & mask;
     }
 
-    set->slots[idx].key = key;
-    set->slots[idx].state = OCCUPIED;
+    set->keys[idx] = key;
     set->count++;
     return false; // newly inserted
 }
