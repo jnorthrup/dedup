@@ -1,0 +1,3 @@
+## 2026-10-14 - Robust CLI Progress Bar Display
+**Learning:** In CLI utilities, calculating progress percentage without zero-check on total units causes `nan%` outputs and undefined floating-point to integer conversions. Additionally, unchecked `ioctl(TIOCGWINSZ)` calls or small terminal column widths can result in `size_t` underflow that causes unintended line wrapping and breaks ANSI clear-line animations.
+**Action:** Always guard progress percentage calculations for zero total units, validate terminal width with safe fallbacks and bounds, and use `<` rather than `<=` for index-to-completion character comparison.
