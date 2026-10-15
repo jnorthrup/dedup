@@ -25,6 +25,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 #include "alist.h"
+#include <string.h>
 
 AList* new_alist() {
     return new_alist_with_capacity(ALIST_DEFAULT_CAPACITY);
@@ -54,9 +55,18 @@ void alist_trim(AList* list) {
 
 
 void alist_ensure(AList* list, size_t required) {
-    while (list->capacity < required) {
-        size_t new_capacity = list->capacity * 2;
-        list->elements= realloc(list->elements, sizeof(void*) * new_capacity);
+    if (list->capacity >= required) {
+        return;
+    }
+    // Optimization: Calculate target capacity first to execute a single realloc,
+    // avoiding redundant intermediate reallocations in a loop and handling 0 capacity.
+    size_t new_capacity = list->capacity == 0 ? ALIST_DEFAULT_CAPACITY : list->capacity;
+    while (new_capacity < required) {
+        new_capacity *= 2;
+    }
+    void** new_elements = realloc(list->elements, sizeof(void*) * new_capacity);
+    if (new_elements) {
+        list->elements = new_elements;
         list->capacity = new_capacity;
     }
 }
@@ -95,8 +105,11 @@ void* alist_remove(AList* list, size_t index) {
         return NULL;
     }
     void* e = list->elements[index];
-    for (size_t i = index + 1; i < list->size; i++) {
-        list->elements[i - 1] = list->elements[i];
+    // Optimization: Use memmove for fast vectorized contiguous block memory shifting
+    // instead of an element-by-element loop.
+    size_t num_to_move = list->size - index - 1;
+    if (num_to_move > 0) {
+        memmove(&list->elements[index], &list->elements[index + 1], num_to_move * sizeof(void*));
     }
     list->size--;
     return e;
