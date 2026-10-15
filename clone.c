@@ -73,6 +73,28 @@ int find_zero_file(const char* restrict path) {
     return 0;
 }
 
+#if !defined(__APPLE__)
+#include <libgen.h>
+#include <limits.h>
+static char* dirname_r(const char* path, char* buf) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    char* d = dirname(tmp);
+    if (!d) return NULL;
+    snprintf(buf, PATH_MAX, "%s", d);
+    return buf;
+}
+
+static char* basename_r(const char* path, char* buf) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    char* b = basename(tmp);
+    if (!b) return NULL;
+    snprintf(buf, PATH_MAX, "%s", b);
+    return buf;
+}
+#endif
+
 // Expects `out` to be char[PATH_MAX].
 //
 char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
@@ -245,14 +267,28 @@ int replace_with_clone(const char* src, const char* dst) {
 
 
 int replace_with_link(const char* src, const char* dst) {
-    // TODO: should this atomically move a tmp file instead of
-    //       two step an unlink and link?
-    if (unlink(dst)) {
-        warn("%s", dst);
-        return 1;
+    // Stage: create a temporary hard link, then atomic rename(2) swap.
+    // At any point during this sequence, dst is either the original
+    // file or a valid hard link — never missing or prematurely deleted.
+    char tmp[PATH_MAX];
+    if (!tmp_name(dst, tmp, PATH_MAX)) {
+        return errno;
     }
 
-    return link(src, dst);
+    int r = link(src, tmp);
+    if (r) {
+        int e = errno;
+        return e;
+    }
+
+    r = rename(tmp, dst);
+    if (r) {
+        int e = errno;
+        unlink(tmp);
+        return e;
+    }
+
+    return 0;
 }
 
 // returns a relative path to dst from src

@@ -25,7 +25,13 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 
+#if defined(__APPLE__)
 #include <sys/attr.h>
+#endif
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <stdio.h>
 
 #include <check.h>
 #include <errno.h>
@@ -113,6 +119,48 @@ START_TEST(clone_path_relative_to_test) {
 
 } END_TEST
 
+START_TEST(replace_with_link_success) {
+    char src[] = "/tmp/dedup_link_test_src_XXXXXX";
+    char dst[] = "/tmp/dedup_link_test_dst_XXXXXX";
+    int fd1 = mkstemp(src);
+    int fd2 = mkstemp(dst);
+    ck_assert_int_ge(fd1, 0);
+    ck_assert_int_ge(fd2, 0);
+    write(fd1, "testdata", 8);
+    write(fd2, "testdata", 8);
+    close(fd1);
+    close(fd2);
+
+    int r = replace_with_link(src, dst);
+    ck_assert_int_eq(r, 0);
+
+    struct stat sb1, sb2;
+    ck_assert_int_eq(0, stat(src, &sb1));
+    ck_assert_int_eq(0, stat(dst, &sb2));
+    ck_assert_int_eq(sb1.st_ino, sb2.st_ino);
+
+    unlink(src);
+    unlink(dst);
+} END_TEST
+
+START_TEST(replace_with_link_preserves_dst_on_failure) {
+    char dst[] = "/tmp/dedup_link_test_dst_preserve_XXXXXX";
+    int fd = mkstemp(dst);
+    ck_assert_int_ge(fd, 0);
+    write(fd, "important data", 14);
+    close(fd);
+
+    int r = replace_with_link("/tmp/nonexistent_src_file_xyz_12345", dst);
+    ck_assert_int_ne(r, 0);
+
+    // Verify dst still exists and was NOT destroyed by link failure
+    struct stat sb;
+    ck_assert_int_eq(0, stat(dst, &sb));
+    ck_assert_int_eq(14, sb.st_size);
+
+    unlink(dst);
+} END_TEST
+
 Suite* clone_suite() {
     TCase* tc = tcase_create("clone");
     tcase_add_test(tc, clone_path_to_long);
@@ -121,6 +169,8 @@ Suite* clone_suite() {
     tcase_add_test(tc, clone_cannot_replace);
     tcase_add_test(tc, clone_tmp_name);
     tcase_add_test(tc, clone_path_relative_to_test);
+    tcase_add_test(tc, replace_with_link_success);
+    tcase_add_test(tc, replace_with_link_preserves_dst_on_failure);
 
     Suite* s = suite_create("clone");
     suite_add_tcase(s, tc);
