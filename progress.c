@@ -24,6 +24,7 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -33,16 +34,34 @@
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
+static bool progress_enabled = true;
+
+void disable_progress() {
+    clear_progress();
+    progress_enabled = false;
+}
+
+void enable_progress() {
+    progress_enabled = true;
+}
+
 void display_progress(const Progress* progress) {
+    if (!progress_enabled || !progress) {
+        return;
+    }
+
     struct winsize w;
     ioctl(0, TIOCGWINSZ, &w);
 
+    const char* note = progress->note ? progress->note : "";
     size_t width = w.ws_col - 23 - (progress->note ? strlen(progress->note) : 6);
     width = MIN(width, 80);
 
     clear_progress();
     fputc('[', stderr);
-    double percent_complete = (double) progress->completedUnitCount / (double) progress->totalUnitCount;
+    double percent_complete = (progress->totalUnitCount > 0)
+        ? (double) progress->completedUnitCount / (double) progress->totalUnitCount
+        : 0.0;
     size_t complete = width * percent_complete;
     for (size_t i = 0; i < width; i++) {
         if (i <= complete) {
@@ -51,14 +70,13 @@ void display_progress(const Progress* progress) {
             fputc(' ', stderr);
         }
     }
-    fprintf(stderr, "] %.0f%% (%llu of %llu) %s",
+    fprintf(stderr, "] %.0f%% (%lu of %lu) %s",
             percent_complete * 100.0,
-            progress->completedUnitCount,
-            progress->totalUnitCount,
-            progress->note ?: "");
+            (unsigned long) progress->completedUnitCount,
+            (unsigned long) progress->totalUnitCount,
+            note);
     fflush(stderr);
 }
-
 
 void clear_progress() {
     fprintf(stderr, "\r\033[K");
