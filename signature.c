@@ -133,38 +133,8 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
         return sig;
     }
 
-    // Sample at 4 strategic positions
-    off_t positions[4] = {
-        0,                               // Start
-        (off_t)(size / 3),               // 1/3 point
-        (off_t)((size * 2) / 3),         // 2/3 point
-        (off_t)(size > 4 ? size - 4 : 0) // End (or start if file < 4 bytes)
-    };
-
-#ifdef __ARM_NEON
-    if (size >= 16) {
-        char buf[16] __attribute__((aligned(16)));
-        for (int i = 0; i < 4; i++) {
-            if (pread(fd, &buf[i * 4], 4, positions[i]) != 4) {
-                close(fd);
-                free(sig);
-                return NULL;
-            }
-        }
-        int32x4_t samples_vec = vld1q_s32((int32_t*)buf);
-        vst1q_s32(sig->samples, samples_vec);
-    } else
-#endif
-    {
-        for (int i = 0; i < 4; i++) {
-            if (!read_sample_into(fd, positions[i], size, &sig->samples[i])) {
-                close(fd);
-                free(sig);
-                return NULL;
-            }
-        }
-    }
-
+    // Read initial 4KB buffer (or file size if smaller) first to compute quick_hash
+    // and extract sample points directly without extra pread system calls.
     size_t hash_size = size < 4096 ? (size_t)size : 4096U;
     char* buf = malloc(hash_size);
     if (!buf) {
@@ -187,6 +157,37 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
         hash_fn = dispatch->fast_hash;
     }
     sig->quick_hash = hash_fn(buf, (size_t)n);
+
+    // Sample at 4 strategic positions
+    off_t positions[4] = {
+        0,                               // Start
+        (off_t)(size / 3),               // 1/3 point
+        (off_t)((size * 2) / 3),         // 2/3 point
+        (off_t)(size > 4 ? size - 4 : 0) // End (or start if file < 4 bytes)
+    };
+
+    // Performance optimization: extract samples directly from the already-read
+    // initial 4KB buffer when available, avoiding redundant pread syscalls.
+    // Reduces syscall overhead by up to 80% for files <= 4KB and at least 20% for larger files.
+    for (int i = 0; i < 4; i++) {
+        if (positions[i] >= 0 && (size_t)positions[i] < (size_t)n) {
+            size_t remaining_in_buf = (size_t)n - (size_t)positions[i];
+            if (remaining_in_buf >= sizeof(int32_t) || (size_t)n == (size_t)size) {
+                size_t to_copy = remaining_in_buf < sizeof(int32_t) ? remaining_in_buf : sizeof(int32_t);
+                unsigned char raw[sizeof(int32_t)] = {0};
+                memcpy(raw, buf + positions[i], to_copy);
+                memcpy(&sig->samples[i], raw, sizeof(int32_t));
+                continue;
+            }
+        }
+
+        if (!read_sample_into(fd, positions[i], size, &sig->samples[i])) {
+            free(buf);
+            close(fd);
+            free(sig);
+            return NULL;
+        }
+    }
 
     free(buf);
     close(fd);
