@@ -273,13 +273,18 @@ static void display_status(DedupContext* ctx, const char* path) {
     int fixed_width = 41;
     int path_max = width - fixed_width - 1;
     if (path_max < 10) path_max = 10;
-    
+
     char truncated_path[256];
+    // Cap path_max to destination buffer size minus null terminator to prevent stack overflow
+    if (path_max >= (int)sizeof(truncated_path)) {
+        path_max = (int)sizeof(truncated_path) - 1;
+    }
+
     memset(truncated_path, 0, sizeof(truncated_path));
     if (path) {
         size_t len = strlen(path);
         if (len <= (size_t)path_max) {
-            strcpy(truncated_path, path);
+            snprintf(truncated_path, sizeof(truncated_path), "%s", path);
         } else {
             size_t keep = path_max - 1;
             truncated_path[0] = '~';
