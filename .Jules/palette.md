@@ -1,0 +1,3 @@
+## 2026-10-16 - Terminal Progress Bar Terminal Window Bounds & Underflow Protection
+**Learning:** Terminal progress indicators that rely on `ioctl(0, TIOCGWINSZ, ...)` fail when input streams (stdin) are redirected, returning uninitialized/zero window dimensions. Unsigned subtraction on `w.ws_col - reserved` causes `size_t` underflow to massive numbers (forcing full-width wrapping on narrow screens), while 0/0 unit counts result in NaN percentages.
+**Action:** Always query the output file descriptor (`STDERR_FILENO`), apply explicit minimum column fallbacks, clamp division-by-zero to 0.0%, and ensure 0% renders an empty progress bar (`i < complete`).
