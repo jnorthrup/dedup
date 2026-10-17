@@ -46,8 +46,10 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include <sys/mount.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
 #include <sys/attr.h>
 #include <sys/sysctl.h>
+#endif
 #include <sys/ioctl.h>
 
 #include <assert.h>
@@ -846,7 +848,7 @@ static void usage(char* pgm, DedupContext* ctx) {
                 // "                           source or being replaced by a clone. This option\n"
                 // "                           can be specified multiple times.\n"
                 "  --dry-run, -n            Don't replace file content, just print what \n"
-                "                           would have happend.\n"
+                "                           would have happened.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
                 "  --format, -F format      Output format for byte sizes. See --help formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
@@ -1043,6 +1045,10 @@ int main(int argc, char* argv[]) {
                 max_depth = d;
                 break;
             case 'F':
+                if (optarg && (strcmp(optarg, "help") == 0 || strcmp(optarg, "formats") == 0 || strcmp(optarg, "list") == 0 || strcmp(optarg, "?") == 0)) {
+                    list_available_formats(stdout);
+                    return 0;
+                }
                 dc.output_format = parse_output_format(optarg);
                 break;
             case 'h':
@@ -1081,6 +1087,10 @@ int main(int argc, char* argv[]) {
                 break;
             case '?':
             default:
+                if (optind < argc && argv[optind] && (strcmp(argv[optind], "formats") == 0 || strcmp(argv[optind], "list") == 0)) {
+                    list_available_formats(stdout);
+                    return 0;
+                }
                 usage(argv[0], &dc);
         }
     }
