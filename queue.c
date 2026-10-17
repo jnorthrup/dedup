@@ -69,7 +69,10 @@ FileEntry* file_entry_next(FileEntryHead* queue) {
      }
 
      FileEntry* e = STAILQ_FIRST(queue);
-     STAILQ_REMOVE(queue, e, FileEntry, entries);
+     // Use STAILQ_REMOVE_HEAD for O(1) popping of the head element.
+     // STAILQ_REMOVE compares and scans the queue, whereas STAILQ_REMOVE_HEAD
+     // directly updates the head/tail pointers.
+     STAILQ_REMOVE_HEAD(queue, entries);
 
      return e;
 }
