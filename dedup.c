@@ -46,8 +46,10 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include <sys/mount.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
 #include <sys/attr.h>
 #include <sys/sysctl.h>
+#endif
 #include <sys/ioctl.h>
 
 #include <assert.h>
@@ -874,10 +876,16 @@ static void usage(char* pgm, DedupContext* ctx) {
 
 __attribute__((const))
 int32_t cpu_count() {
+#if defined(__APPLE__)
     int32_t c = 0;
     size_t len = sizeof(int32_t);
     sysctlbyname("hw.ncpu", &c, &len, NULL, 0);
     return c;
+#elif defined(_SC_NPROCESSORS_ONLN)
+    return (int32_t)sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    return 1;
+#endif
 }
 
 #if defined(__APPLE__)
