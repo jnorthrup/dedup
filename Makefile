@@ -65,8 +65,16 @@ all: dedup
 ifdef UBT
 CFLAGS += -DHAVE_UBT -Iubifs
 LDFLAGS_UBT = -Lubifs -lubt
+UBT_LIB = ubifs/libubt.a
+UBT_SRCS = ubifs/image.c ubifs/super.c ubifs/extent.c ubifs/clone.c
+# Host-arch backend archive, built on demand; universal builds replace
+# it with a fat archive first (see dedup.universal). Keep UBT_SRCS in
+# sync with SRCS in ubifs/Makefile.
+ubifs/libubt.a: $(UBT_SRCS)
+	$(MAKE) -C ubifs
 else
 LDFLAGS_UBT =
+UBT_LIB =
 endif
 
 dedup.o: CFLAGS += -I/opt/homebrew/include
@@ -74,13 +82,16 @@ dedup.o: CFLAGS += -I/opt/homebrew/include
 dedup.arm: CFLAGS += -target arm64-apple-macos11 -I/opt/homebrew/include
 dedup.x86_64: CFLAGS += -target x86_64-apple-macos11 -I/opt/homebrew/include
 
-dedup dedup.arm dedup.x86_64: $(OBJECTS)
+dedup dedup.arm dedup.x86_64: $(OBJECTS) $(UBT_LIB)
 	$(CC) $(CFLAGS) -o $@ $^ -L/opt/homebrew/lib -lxxhash $(LDFLAGS_UBT)
 	mv $@ $@.unsigned
 	codesign -s - -v -f $(ENTITLEMENT_FLAGS) $@.unsigned
 	mv $@.unsigned $@
 
 dedup.universal:
+ifdef UBT
+	$(MAKE) -C ubifs universal
+endif
 	rm -f *.o
 	$(MAKE) dedup.arm
 	rm -f *.o
@@ -124,6 +135,7 @@ clean: clean-coverage
 	rm -rf *.dSYM/
 	rm -f *.tidy
 	rm -f dedup dedup.arm dedup.x86_64 dedup.universal
+	cd ubifs && $(MAKE) clean
 	cd test && make clean
 	rm -rf build
 
