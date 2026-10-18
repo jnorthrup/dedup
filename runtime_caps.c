@@ -19,7 +19,7 @@ static bool g_runtime_caps_initialized = false;
 static volatile int g_memcmp_bench_sink = 0;
 static volatile int g_exact_bench_sink = 0;
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
 static bool have_sysctl_u32(const char* name) {
     uint32_t value = 0;
     size_t size = sizeof(value);
