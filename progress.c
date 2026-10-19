@@ -34,18 +34,31 @@
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 void display_progress(const Progress* progress) {
-    struct winsize w;
-    ioctl(0, TIOCGWINSZ, &w);
+    if (!progress) {
+        return;
+    }
 
-    size_t width = w.ws_col - 23 - (progress->note ? strlen(progress->note) : 6);
+    struct winsize w;
+    if (ioctl(0, TIOCGWINSZ, &w) != 0 || w.ws_col == 0) {
+        w.ws_col = 80;
+    }
+
+    size_t note_len = progress->note ? strlen(progress->note) : 6;
+    size_t overhead = 23 + note_len;
+    size_t width = (w.ws_col > overhead) ? (w.ws_col - overhead) : 10;
     width = MIN(width, 80);
 
     clear_progress();
     fputc('[', stderr);
-    double percent_complete = (double) progress->completedUnitCount / (double) progress->totalUnitCount;
-    size_t complete = width * percent_complete;
+    double percent_complete = progress->totalUnitCount > 0
+        ? ((double) progress->completedUnitCount / (double) progress->totalUnitCount)
+        : 0.0;
+    if (percent_complete > 1.0) percent_complete = 1.0;
+    if (percent_complete < 0.0) percent_complete = 0.0;
+
+    size_t complete = (size_t)(width * percent_complete);
     for (size_t i = 0; i < width; i++) {
-        if (i <= complete) {
+        if (i < complete) {
             fputc('#', stderr);
         } else {
             fputc(' ', stderr);
@@ -53,8 +66,8 @@ void display_progress(const Progress* progress) {
     }
     fprintf(stderr, "] %.0f%% (%llu of %llu) %s",
             percent_complete * 100.0,
-            progress->completedUnitCount,
-            progress->totalUnitCount,
+            (unsigned long long)progress->completedUnitCount,
+            (unsigned long long)progress->totalUnitCount,
             progress->note ?: "");
     fflush(stderr);
 }
