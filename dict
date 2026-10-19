@@ -25,14 +25,17 @@ clonefile
 copyfile
 dedup
 deduplicated
+deduplicates
 deduplicating
 du
 enum
+filesystem
 hardlink
 hardlinked
 hw
 inode
 macOS
+mtime
 ncpu
 né
 symlink

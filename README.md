@@ -150,6 +150,12 @@ The following options are available:
 > from descending into directories that have a device number different than that
 > of the file from which the descent began.
 
+**-m**, **-&#45;parent-mtime**
+
+> Preserve the parent directory modification time (mtime) when a file is cloned.
+> Useful when working with backups or other programs that are sensitive to
+> directory changes.
+
 **-**?, **-&#45;help**
 
 > Print a summary of options and exit.
@@ -207,6 +213,8 @@ causes several race conditions if underlying files are being modified. If a file
 acting as a clone source or target is modified between any of the following
 events, a file may be replaced by something that resembles it's previous state.
 
+`dedup` operates by following this order of operations:
+
 1. File metadata retrieval and comparison to previously seen files
 2. Creation of a clone from a source
 3. Application of file metadata from the target
@@ -218,6 +226,19 @@ may be changed and then overwritten by a clone with it's previous content.
 
 It may be reasonable for future versions to include additional checks and locks
 to ensure modifications are detected prior to clone replacement (#5).
+
+## Block Corruption Risk
+
+APFS cloning deduplicates storage by making all instances of a file reference the
+same underlying blocks. **If even one of those blocks becomes corrupted, all
+cloned instances are affected.** This is not a problem with
+**dedup**
+or something that
+**dedup**
+can prevent, but is a fact of any filesystem. Reducing the number of copies in a
+single volume reduces one level of redundancy. This may pose a risk for unique or
+irreplaceable files. It is always a good idea to maintain backups on different
+logical volumes of any files, including ones that may be deduplicated.
 
 # HISTORY
 

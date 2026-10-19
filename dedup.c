@@ -1,4 +1,4 @@
-// Copyright © 2023 TTKB, LLC.
+// Copyright © 2023-2026 TTKB, LLC.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
@@ -154,6 +154,7 @@ typedef struct DedupContext {
     bool dry_run;
     uint8_t verbosity;
     bool force;
+    bool preserve_parent_mtime;
     ReplaceMode replace_mode;
     OutputFormat output_format;
     bool clone_converted;        // Whether to convert clones (true by default)
@@ -448,7 +449,8 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             int result = 0;
             switch (ctx->replace_mode) {
             case DEDUP_CLONE:
-                result = replace_with_clone(existing->path, fe->path);
+                result = replace_with_clone(existing->path, fe->path,
+                                           ctx->preserve_parent_mtime);
                 break;
             case DEDUP_LINK:
                 result = replace_with_link(existing->path, fe->path);
@@ -784,7 +786,6 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
         if (ctx->dry_run) {
             printf("\tcloning to %s\n",
                    fm->path);
-
             ctx->saved += fm->size;
             continue;
         }
@@ -793,7 +794,8 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
         switch (ctx->replace_mode) {
         case DEDUP_CLONE:
             result = replace_with_clone(origin->path,
-                                        fm->path);
+                                        fm->path,
+                                        ctx->preserve_parent_mtime);
             break;
         case DEDUP_LINK:
             result = replace_with_link(origin->path,
@@ -840,7 +842,7 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
 __attribute__((noreturn))
 static void usage(char* pgm, DedupContext* ctx) {
     fprintf(stderr,
-            "%s\nusage: %s [-I pattern] [-t n] [-PVcnvx] [-d n] [file ...]\n\n"
+            "%s\nusage: %s [-I pattern] [-t n] [-PVcmnvx] [-d n] [file ...]\n\n"
                 "Options:\n"
                 // "  --ignore, -I pattern     Exclude a pattern from being used as a clone\n"
                 // "                           source or being replaced by a clone. This option\n"
@@ -860,6 +862,8 @@ static void usage(char* pgm, DedupContext* ctx) {
                 "                           (itemized by directory hierarchy)\n"
                 "  --threads, -t n          The number of threads to use for file building\n"
                 "                           lookup tables and replacing clones. Default: %d\n"
+                "  --parent-mtime, -m       Preserve the mtime of any parent directory\n"
+                "                           modified with a clone.\n"
                 "  --verbose, -v            Increase verbosity. May be used multiple times.\n"
                 "  --version, -V            Print the version and exit\n"
                 // "  --force, -f              Don't preserve existing hardlinks.\n"
@@ -972,7 +976,8 @@ int main(int argc, char* argv[]) {
         .prune_done = 0,
         .dry_run = false,
         .verbosity = 0,
-        .force = 0,
+        .force = false,
+        .preserve_parent_mtime = false,
         .replace_mode = DEDUP_CLONE,
         .output_format = OUTPUT_SI_HUMAN,
         .clone_converted = true,
@@ -1004,6 +1009,7 @@ int main(int argc, char* argv[]) {
         { "format",          required_argument, NULL, 'F' },
         { "link",            no_argument,       NULL, 'l' },
         { "dry-run",         no_argument,       NULL, 'n' },
+        { "parent-mtime",    no_argument,       NULL, 'm' },
         { "symlink",         no_argument,       NULL, 's' },
         { "threads",         required_argument, NULL, 't' },
         { "verbose",         no_argument,       NULL, 'v' },
@@ -1019,7 +1025,7 @@ int main(int argc, char* argv[]) {
 
     int ch = -1, t;
     short d;
-    while ((ch = getopt_long(argc, argv, "I:PVc::d:F:hlnst:vxCS:", options, NULL)) != -1) {
+    while ((ch = getopt_long(argc, argv, "I:PVc::d:F:fhlmnst:vxCS:?", options, NULL)) != -1) {
         switch (ch) {
             case 'I':
                 fprintf(stderr, "-I is unimplemented\n");
@@ -1050,6 +1056,9 @@ int main(int argc, char* argv[]) {
                 break;
             case 'l':
                 dc.replace_mode = DEDUP_LINK;
+                break;
+            case 'm':
+                dc.preserve_parent_mtime = true;
                 break;
             case 'n':
                 dc.dry_run = true;
