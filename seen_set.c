@@ -29,18 +29,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define EMPTY    0
-#define OCCUPIED 1
-
-typedef struct {
-    uint64_t key;
-    uint8_t  state;
-} Slot;
-
 struct SeenSet {
-    Slot*  slots;
-    size_t capacity; // always a power of 2
-    size_t count;
+    uint64_t* slots;
+    size_t    capacity; // always a power of 2
+    size_t    count;
+    bool      contains_zero;
 };
 
 static size_t next_power_of_2(size_t v) {
@@ -62,7 +55,7 @@ SeenSet* new_seen_set(size_t capacity) {
     SeenSet* set = malloc(sizeof(SeenSet));
     if (!set) return NULL;
 
-    set->slots = calloc(capacity, sizeof(Slot));
+    set->slots = calloc(capacity, sizeof(uint64_t));
     if (!set->slots) {
         free(set);
         return NULL;
@@ -70,6 +63,7 @@ SeenSet* new_seen_set(size_t capacity) {
 
     set->capacity = capacity;
     set->count = 0;
+    set->contains_zero = false;
     return set;
 }
 
@@ -86,19 +80,18 @@ static inline size_t hash_key(uint64_t key, size_t mask) {
 
 static bool seen_set_grow(SeenSet* set) {
     size_t new_cap = set->capacity * 2;
-    Slot* new_slots = calloc(new_cap, sizeof(Slot));
+    uint64_t* new_slots = calloc(new_cap, sizeof(uint64_t));
     if (!new_slots) return false;
 
     size_t mask = new_cap - 1;
     for (size_t i = 0; i < set->capacity; i++) {
-        if (set->slots[i].state != OCCUPIED) continue;
-        uint64_t key = set->slots[i].key;
+        uint64_t key = set->slots[i];
+        if (key == 0) continue;
         size_t idx = hash_key(key, mask);
-        while (new_slots[idx].state == OCCUPIED) {
+        while (new_slots[idx] != 0) {
             idx = (idx + 1) & mask;
         }
-        new_slots[idx].key = key;
-        new_slots[idx].state = OCCUPIED;
+        new_slots[idx] = key;
     }
 
     free(set->slots);
@@ -107,7 +100,18 @@ static bool seen_set_grow(SeenSet* set) {
     return true;
 }
 
+// Optimization: Removed separate Slot struct (which had 7 bytes of struct alignment padding per 9 bytes of payload).
+// Using flat uint64_t array cuts memory usage in half and doubles L1 cache line density (8 slots per 64B cache line).
 bool seen_set_insert(SeenSet* set, uint64_t key) {
+    if (key == 0) {
+        if (set->contains_zero) {
+            return true;
+        }
+        set->contains_zero = true;
+        set->count++;
+        return false;
+    }
+
     // Grow at 75% load
     if (set->count * 4 >= set->capacity * 3) {
         seen_set_grow(set);
@@ -116,15 +120,14 @@ bool seen_set_insert(SeenSet* set, uint64_t key) {
     size_t mask = set->capacity - 1;
     size_t idx = hash_key(key, mask);
 
-    while (set->slots[idx].state == OCCUPIED) {
-        if (set->slots[idx].key == key) {
+    while (set->slots[idx] != 0) {
+        if (set->slots[idx] == key) {
             return true; // already present
         }
         idx = (idx + 1) & mask;
     }
 
-    set->slots[idx].key = key;
-    set->slots[idx].state = OCCUPIED;
+    set->slots[idx] = key;
     set->count++;
     return false; // newly inserted
 }
