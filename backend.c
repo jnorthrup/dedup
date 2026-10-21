@@ -35,7 +35,13 @@ static CloneBackend probe_ficlone(void) {
 
     /* Write a byte so the file is non-empty */
     char buf[1] = { 'x' };
-    write(src_fd, buf, 1);
+    if (write(src_fd, buf, 1) != 1) {
+        close(src_fd);
+        close(dst_fd);
+        unlink(src);
+        unlink(dst);
+        return BACKEND_AUTO;
+    }
     fsync(src_fd);
 
     int r = ioctl(dst_fd, FICLONE, src_fd);
