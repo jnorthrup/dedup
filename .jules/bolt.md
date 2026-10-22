@@ -1,0 +1,3 @@
+## 2026-10-22 - Dynamic Resizing & Bitwise Indexing for Signature Hash Tables
+**Learning:** Fixed-size signature hash tables cause severe hash collision chain buildup ($O(N)$ lookup degradation) when scanning large directory structures with >100,000 files. Rounding capacity to powers of two enables single-cycle bitwise AND masking (`hash & (cap - 1)`) instead of multi-cycle 64-bit integer division (`hash % cap`). Auto-resizing when load factor reaches 1.0 maintains $O(1)$ lookup performance.
+**Action:** Always ensure hash tables in file deduplication/traversal tools dynamically resize and use power-of-two mask indexing to handle arbitrarily large file trees smoothly.
