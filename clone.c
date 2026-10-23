@@ -262,6 +262,12 @@ char* path_relative_to(const char* src, const char* dst) {
         * orig_real_src = real_src,
         * orig_real_dst = real_dst;
 
+    if (!real_src || !real_dst) {
+        free(orig_real_src);
+        free(orig_real_dst);
+        return NULL;
+    }
+
     // consume root /
     real_src++;
     real_dst++;
@@ -308,13 +314,25 @@ char* path_relative_to(const char* src, const char* dst) {
 
     free(orig_real_src);
     char* path = calloc(PATH_MAX, 1);
+    if (!path) {
+        free(orig_real_dst);
+        return NULL;
+    }
+
+    size_t dst_len = strlen(real_dst);
+    if ((size_t)(depth * 3) + dst_len >= PATH_MAX) {
+        free(path);
+        free(orig_real_dst);
+        return NULL;
+    }
+
     int pos = 0;
     for (int i = 0; i < depth; i++) {
         path[pos++] = '.';
         path[pos++] = '.';
         path[pos++] = '/';
     }
-    memcpy(path + pos, real_dst, strlen(real_dst));
+    memcpy(path + pos, real_dst, dst_len);
     free(orig_real_dst);
 
     return path;
