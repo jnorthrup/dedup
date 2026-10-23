@@ -4,6 +4,9 @@
 
 #include <check.h>
 #include <limits.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +25,7 @@ static void clear_runtime_env(void) {
     unsetenv("DEDUP_FORCE_STRONG_HASH");
     unsetenv("DEDUP_FORCE_WITNESS");
     unsetenv("DEDUP_FORCE_EXACT_COMPARE");
+    unsetenv("DEDUP_FORCE_GPU");
     unsetenv("DEDUP_WITNESS_THRESHOLD_BYTES");
     unsetenv("DEDUP_GPU_BATCH_THRESHOLD");
     unsetenv("DEDUP_EXACT_LARGE_THRESHOLD_BYTES");
@@ -56,6 +60,69 @@ START_TEST(runtime_caps_are_cached_and_resettable) {
     dedup_runtime_caps_reset_for_tests();
     const DedupRuntimeCaps* caps_c = dedup_runtime_caps_get();
     ck_assert_ptr_nonnull(caps_c);
+} END_TEST
+
+typedef struct RuntimeInitThread {
+    atomic_bool* start;
+    const DedupRuntimeCaps* caps;
+    const DedupRuntimeDispatch* dispatch;
+    bool valid;
+} RuntimeInitThread;
+
+static void* initialize_runtime_on_thread(void* raw) {
+    RuntimeInitThread* result = raw;
+    while (!atomic_load_explicit(result->start, memory_order_acquire)) {
+        sched_yield();
+    }
+    result->caps = dedup_runtime_caps_get();
+    result->dispatch = dedup_runtime_dispatch_get();
+    const DedupRuntimeDispatch* dispatch = result->dispatch;
+    result->valid = result->caps && dispatch && dispatch->fast_hash_name &&
+                    strcmp(dispatch->fast_hash_name, "xxhash") == 0 &&
+                    dispatch->fast_hash && dispatch->witness &&
+                    dispatch->exact_small && dispatch->exact_large &&
+                    dispatch->witness_threshold != 0 && dispatch->exact_large_threshold != 0;
+    return NULL;
+}
+
+START_TEST(runtime_initialization_is_safe_for_parallel_workers) {
+    clear_runtime_env();
+    dedup_runtime_dispatch_reset_for_tests();
+    dedup_runtime_caps_reset_for_tests();
+    enum { THREAD_COUNT = 16 };
+    pthread_t threads[THREAD_COUNT];
+    RuntimeInitThread results[THREAD_COUNT] = {0};
+    atomic_bool start = false;
+    for (size_t i = 0; i < THREAD_COUNT; i++) {
+        results[i].start = &start;
+        ck_assert_int_eq(0, pthread_create(&threads[i], NULL, initialize_runtime_on_thread, &results[i]));
+    }
+    atomic_store_explicit(&start, true, memory_order_release);
+    for (size_t i = 0; i < THREAD_COUNT; i++) {
+        ck_assert_int_eq(0, pthread_join(threads[i], NULL));
+        ck_assert(results[i].valid);
+        ck_assert_ptr_eq(results[0].caps, results[i].caps);
+        ck_assert_ptr_eq(results[0].dispatch, results[i].dispatch);
+    }
+} END_TEST
+
+START_TEST(runtime_dispatch_rejects_invalid_thresholds) {
+    clear_runtime_env();
+    dedup_runtime_dispatch_reset_for_tests();
+    const DedupRuntimeDispatch defaults = *dedup_runtime_dispatch_get();
+    const char* invalid[] = {"-1", "0", "18446744073709551616", "123bytes", " 42", "+42"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        setenv("DEDUP_WITNESS_THRESHOLD_BYTES", invalid[i], 1);
+        setenv("DEDUP_EXACT_LARGE_THRESHOLD_BYTES", invalid[i], 1);
+        setenv("DEDUP_GPU_BATCH_THRESHOLD", invalid[i], 1);
+        dedup_runtime_dispatch_reset_for_tests();
+        const DedupRuntimeDispatch* dispatch = dedup_runtime_dispatch_get();
+        ck_assert_uint_eq(defaults.witness_threshold, dispatch->witness_threshold);
+        ck_assert_uint_eq(defaults.exact_large_threshold, dispatch->exact_large_threshold);
+        ck_assert_uint_eq(defaults.gpu_batch_threshold, dispatch->gpu_batch_threshold);
+    }
+    clear_runtime_env();
+    dedup_runtime_dispatch_reset_for_tests();
 } END_TEST
 
 START_TEST(runtime_dispatch_has_expected_defaults) {
@@ -147,6 +214,8 @@ START_TEST(runtime_witness_compare_defaults_to_non_rejecting) {
 Suite* runtime_dispatch_suite(void) {
     TCase* tc = tcase_create("runtime_dispatch");
     tcase_add_test(tc, runtime_caps_are_cached_and_resettable);
+    tcase_add_test(tc, runtime_initialization_is_safe_for_parallel_workers);
+    tcase_add_test(tc, runtime_dispatch_rejects_invalid_thresholds);
     tcase_add_test(tc, runtime_dispatch_has_expected_defaults);
     tcase_add_test(tc, runtime_dispatch_honors_overrides);
     tcase_add_test(tc, runtime_exact_compare_uses_bound_backend);

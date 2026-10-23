@@ -27,7 +27,7 @@ LDFLAGS += \
     -L/opt/homebrew/lib
 
 .PHONY: \
-	check check-linux \
+	check check-fast check-linux \
     setup setup-all setup-clonefile setup-symlink setup-link \
     clean clean-test-data clean-clonefile clean-symlink clean-link
 
@@ -40,6 +40,20 @@ check: dedup_check setup-all
 	hdiutil detach /Volumes/dedup-test-hfs-clonefile
 	hdiutil detach /Volumes/dedup-test-hfs-link
 	hdiutil detach /Volumes/dedup-test-hfs-symlink
+
+check-fast: dedup_check output_format_check seen_set_check
+	CK_RUN_CASE=replacement_safety ./dedup_check
+	CK_RUN_SUITE=signature ./dedup_check
+	CK_RUN_SUITE=runtime_dispatch ./dedup_check
+	./output_format_check
+	./seen_set_check
+	python3 cli_test.py
+
+output_format_check: output_format_test.c ../output_format.c ../output_format.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ output_format_test.c ../output_format.c
+
+seen_set_check: seen_set_test.c ../seen_set.c ../seen_set.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ seen_set_test.c
 
 # Linux CI target: uses tmpfs/scratch dirs, no mount privileges needed.
 # Clone/HFS suites skipped unless running as root with btrfs loop device.
@@ -78,7 +92,7 @@ setup-linux:
 	cat test-data-linux/same-first-last/big2 >> test-data-linux/same-first-last/same-2
 	echo "z" >> test-data-linux/same-first-last/same-2
 
-dedup_check: dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o
+dedup_check: dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o
 	rm -f dedup_check.gcda dedup_check.gcno
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ -l check $^
 
@@ -101,6 +115,10 @@ utils_test.o: ../utils.c ../utils.h
 signature_test.o: ../signature.c ../signature.h
 	rm -f signature_test.gcda signature_test.gcno
 	$(CC) $(CFLAGS) -c -o $@ ../signature.c
+
+sig_table_test.o: ../sig_table.c ../sig_table.h
+	rm -f sig_table_test.gcda sig_table_test.gcno
+	$(CC) $(CFLAGS) -c -o $@ ../sig_table.c
 
 runtime_caps_test.o: ../runtime_caps.c ../runtime_caps.h
 	rm -f runtime_caps_test.gcda runtime_caps_test.gcno
@@ -278,5 +296,5 @@ clean-all-test-data:
 clean: clean-all-test-data
 	rm -f *.o
 	rm -rf *.dSYM/
-	rm -f dedup_check
+	rm -f dedup_check output_format_check seen_set_check
 	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o

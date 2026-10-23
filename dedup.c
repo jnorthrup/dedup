@@ -53,6 +53,8 @@ static char sccsid[] = "@(#)dedup.c)";
 #include <assert.h>
 #include <stdlib.h>
 #include <err.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <fts.h>
 #include <getopt.h>
 #include <pthread.h>
@@ -110,6 +112,13 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #endif
 
+// Output must remain visible even when progress is disabled or redirected.
+#define OUTPUT_LOCK(ctx, block) \
+    SYNC((ctx)->progress_mutex, { \
+        if ((ctx)->progress) clear_progress(); \
+        block; \
+    })
+
 // Forward declaration
 typedef struct DedupContext DedupContext;
 
@@ -118,10 +127,18 @@ static FILE* clone_summary_stream = NULL;
 static pthread_mutex_t clone_summary_mutex = PTHREAD_MUTEX_INITIALIZER;
 static size_t clone_summary_count = 0;
 
-static void clone_summary_open(const char* filepath) {
+static int clone_summary_open(const char* filepath) {
     pthread_mutex_lock(&clone_summary_mutex);
     if (!clone_summary_stream) {
-        clone_summary_stream = fopen(filepath, "w");
+        int fd = open(filepath, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) {
+            clone_summary_stream = fdopen(fd, "w");
+            if (!clone_summary_stream) {
+                int error = errno;
+                close(fd);
+                errno = error;
+            }
+        }
         if (clone_summary_stream) {
             fprintf(clone_summary_stream, "DEDUP CLONING SUMMARY\n");
             fprintf(clone_summary_stream, "=====================\n");
@@ -129,6 +146,7 @@ static void clone_summary_open(const char* filepath) {
         }
     }
     pthread_mutex_unlock(&clone_summary_mutex);
+    return clone_summary_stream ? 0 : -1;
 }
 
 static void clone_summary_write(const char* origin, const char* clone, size_t size) {
@@ -141,18 +159,19 @@ static void clone_summary_write(const char* origin, const char* clone, size_t si
     pthread_mutex_unlock(&clone_summary_mutex);
 }
 
-static void clone_summary_close() {
+static int clone_summary_close() {
+    int result = 0;
     pthread_mutex_lock(&clone_summary_mutex);
     if (clone_summary_stream) {
         // Write count at the end
         fprintf(clone_summary_stream, "\nTotal cloning operations: %zu\n", clone_summary_count);
-        fflush(clone_summary_stream);
-        
-        fclose(clone_summary_stream);
+        if (ferror(clone_summary_stream)) result = -1;
+        if (fclose(clone_summary_stream) != 0) result = -1;
         clone_summary_stream = NULL;
         clone_summary_count = 0;
     }
     pthread_mutex_unlock(&clone_summary_mutex);
+    return result;
 }
 
 typedef enum ReplaceMode {
@@ -170,6 +189,7 @@ typedef struct DedupContext {
     size_t saved;
     size_t already_saved;
     size_t pruned;
+    size_t errors;
     size_t total_bytes;  // Accumulated bytes of all scanned files
     size_t queued_count; // Entries in raw_queue + work_queue combined
     uint64_t next_file_sequence;
@@ -201,9 +221,19 @@ typedef struct DedupContext {
     pthread_cond_t visit_order_cond;
 } DedupContext;
 
+static void report_error(DedupContext* ctx, const char* path,
+                         const char* operation, int error) {
+    OUTPUT_LOCK(ctx, {
+        fprintf(stderr, "%s: %s: %s\n", path, operation, strerror(error));
+    });
+    pthread_mutex_lock(&ctx->metrics_mutex);
+    ctx->errors++;
+    pthread_mutex_unlock(&ctx->metrics_mutex);
+}
+
 static int get_terminal_width(void) {
     struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
+    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
         return w.ws_col;
     }
     return 80; // fallback
@@ -238,9 +268,11 @@ static void format_count(size_t count, char buf[5]) {
 }
 
 static void display_status(DedupContext* ctx, const char* path) {
-    if (!isatty(STDOUT_FILENO)) {
+    if (!ctx->progress || !isatty(STDERR_FILENO)) {
         return;
     }
+    static pthread_mutex_t status_mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&status_mutex);
     
     static bool header_printed = false;
     if (!header_printed) {
@@ -307,6 +339,9 @@ static void display_status(DedupContext* ctx, const char* path) {
     if (path_max < 10) path_max = 10;
     
     char truncated_path[256];
+    if (path_max >= (int)sizeof(truncated_path)) {
+        path_max = sizeof(truncated_path) - 1;
+    }
     memset(truncated_path, 0, sizeof(truncated_path));
     if (path) {
         size_t len = strlen(path);
@@ -344,6 +379,7 @@ static void display_status(DedupContext* ctx, const char* path) {
             total_bytes_str, queued_str, shared_str, delta_display,
             progress_str, truncated_path, padding_str);
     fflush(stderr);
+    pthread_mutex_unlock(&status_mutex);
 }
 
 static void visit_order_begin(DedupContext* ctx, uint64_t sequence) {
@@ -377,15 +413,14 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
     FileSignature* sig = compute_signature(fe->path, fe->device, fe->size);
     visit_order_begin(ctx, fe->sequence);
     if (!sig) {
-        // Silently skip files we can't read (locked, slow FUSE mounts, etc)
+        report_error(ctx, fe->path, "cannot read file signature", errno ? errno : EIO);
         visit_order_end(ctx);
         return;
     }
 
     // Insert into signature table and check for duplicates
     if (!ctx->signatures) {
-        PROGRESS_LOCK(ctx->progress, ctx->progress_mutex, {
-            clear_progress();
+        OUTPUT_LOCK(ctx, {
             fprintf(stderr, "signature table not initialized for %s\n", fe->path);
         });
         free_signature(sig);
@@ -401,8 +436,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
     // Safety check: table size should only increase by 0 or 1
     if (table_size_after > table_size_before + 1) {
-        PROGRESS_LOCK(ctx->progress, ctx->progress_mutex, {
-            clear_progress();
+        OUTPUT_LOCK(ctx, {
             fprintf(stderr, "warning: signature table size increased by %zu (expected 0 or 1)\n",
                     table_size_after - table_size_before);
         });
@@ -416,10 +450,13 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
         // Check if already deduplicated
         uint64_t current_clone_id = get_clone_id(fe->path);
-        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id == existing->clone_id) ||
-            (ctx->replace_mode == DEDUP_LINK && fe->inode == get_inode(existing->path))) {
+        bool same_inode = fe->inode == get_inode(existing->path);
+        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id != 0 &&
+             current_clone_id == existing->clone_id) ||
+            same_inode) {
             pthread_mutex_lock(&ctx->metrics_mutex);
-            ctx->already_saved += fe->size;
+            // Repeating a single-link input path does not save storage.
+            if (!same_inode || fe->nlink > 1) ctx->already_saved += fe->size;
             pthread_mutex_unlock(&ctx->metrics_mutex);
             free_signature(sig);
             visit_order_end(ctx);
@@ -429,14 +466,10 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Skip if hardlinked and not forcing
         if (!ctx->force && fe->nlink > 1) {
             if (ctx->verbosity) {
-                PROGRESS_LOCK(ctx->progress, ctx->progress_mutex, {
-                    clear_progress();
+                OUTPUT_LOCK(ctx, {
                     printf("skipping %s, hardlinked\n", fe->path);
                 });
             }
-            pthread_mutex_lock(&ctx->metrics_mutex);
-            ctx->already_saved += fe->size;
-            pthread_mutex_unlock(&ctx->metrics_mutex);
             free_signature(sig);
             visit_order_end(ctx);
             return;
@@ -445,9 +478,12 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Skip if immutable or read-only
         if (fe->flags & UF_IMMUTABLE || fe->flags & SF_IMMUTABLE ||
             (access(fe->path, W_OK) != 0)) {
-            pthread_mutex_lock(&ctx->metrics_mutex);
-            ctx->already_saved += fe->size;
-            pthread_mutex_unlock(&ctx->metrics_mutex);
+            free_signature(sig);
+            visit_order_end(ctx);
+            return;
+        }
+
+        if (ctx->replace_mode == DEDUP_CLONE && !ctx->clone_converted) {
             free_signature(sig);
             visit_order_end(ctx);
             return;
@@ -456,8 +492,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Perform deduplication
         if (ctx->dry_run) {
             if (ctx->verbosity) {
-                PROGRESS_LOCK(ctx->progress, ctx->progress_mutex, {
-                    clear_progress();
+                OUTPUT_LOCK(ctx, {
                     printf("would deduplicate %s to %s\n", fe->path, existing->path);
                 });
             }
@@ -466,17 +501,6 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             ctx->found++;
             pthread_mutex_unlock(&ctx->metrics_mutex);
         } else {
-            // Check if clone conversion is disabled
-            if (ctx->replace_mode == DEDUP_CLONE && !ctx->clone_converted) {
-                // Skip clone conversion, just count as already saved
-                pthread_mutex_lock(&ctx->metrics_mutex);
-                ctx->already_saved += fe->size;
-                pthread_mutex_unlock(&ctx->metrics_mutex);
-                free_signature(sig);
-                visit_order_end(ctx);
-                return;
-            }
-            
             int result = 0;
             switch (ctx->replace_mode) {
             case DEDUP_CLONE:
@@ -492,14 +516,14 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             }
 
             if (result) {
-                // Silently skip clone failures (permissions, filesystem issues, etc)
+                report_error(ctx, fe->path, "cannot replace duplicate",
+                             result > 0 ? result : (errno ? errno : EIO));
                 free_signature(sig);
                 visit_order_end(ctx);
                 return;
             } else {
                 if (ctx->verbosity) {
-                    PROGRESS_LOCK(ctx->progress, ctx->progress_mutex, {
-                        clear_progress();
+                    OUTPUT_LOCK(ctx, {
                         printf("deduplicated %s\n", fe->path);
                     });
                 }
@@ -526,9 +550,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                         clone_summary_write(existing->path, fe->path, fe->size);
                     }
                 } else {
-                    pthread_mutex_lock(&ctx->metrics_mutex);
-                    ctx->already_saved += fe->size; // Count as already saved to avoid double counting
-                    pthread_mutex_unlock(&ctx->metrics_mutex);
+                    report_error(ctx, fe->path, "cannot verify cloned data", EIO);
                 }
             }
         }
@@ -540,10 +562,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             display_status(ctx, fe->path);
         } else {
             // Table failed to take ownership (allocation failure)
-            PROGRESS_LOCK(ctx->progress, ctx->progress_mutex, {
-                clear_progress();
-                fprintf(stderr, "failed to store signature for %s: memory allocation failed\n", fe->path);
-            });
+            report_error(ctx, fe->path, "cannot store signature", ENOMEM);
             free_signature(sig);
         }
     }
@@ -556,17 +575,16 @@ static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clone
     bool pruned = false;
 
     if (fe->nlink > 1) {
-        uint64_t key = (uint64_t)fe->device << 32 | (uint64_t)(fe->inode & 0xFFFFFFFF);
-        if (seen_set_insert(seen_inodes, key)) {
+        if (seen_set_insert(seen_inodes, (uint64_t)fe->device, (uint64_t)fe->inode)) {
             pruned = true;
         }
     }
 
-    if (!pruned) {
+    if (!pruned && c->replace_mode == DEDUP_CLONE) {
 #if defined(__APPLE__)
         uint64_t clone_id = get_clone_id(fe->path);
         if (clone_id != 0) {
-            if (seen_set_insert(seen_clones, clone_id)) {
+            if (seen_set_insert(seen_clones, (uint64_t)fe->device, clone_id)) {
                 pruned = true;
             }
         }
@@ -587,6 +605,7 @@ static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clone
     pthread_mutex_lock(&c->metrics_mutex);
     c->already_saved += fe->size;
     c->pruned++;
+    c->queued_count--;
     pthread_mutex_unlock(&c->metrics_mutex);
     PROGRESS_LOCK(c->progress, c->progress_mutex, {
         c->progress->completedUnitCount++;
@@ -621,11 +640,6 @@ void* prune_work(void* ctx) {
             }
         }
 
-        // Decrement queued_count for raw_queue pop
-        pthread_mutex_lock(&c->metrics_mutex);
-        c->queued_count--;
-        pthread_mutex_unlock(&c->metrics_mutex);
-
         if (prune_entry(fe, seen_inodes, seen_clones, c)) {
             file_entry_free(fe);
             continue;
@@ -657,9 +671,7 @@ void* prune_work(void* ctx) {
 
 void* dedup_work(void* ctx) {
     DedupContext* c = ctx;
-    uint8_t done = c->prune_done;
-
-    while (!done) {
+    for (;;) {
         __block FileEntry* fe;
         SYNC(c->queue_mutex, {
             fe = file_entry_next(c->queue);
@@ -667,14 +679,20 @@ void* dedup_work(void* ctx) {
 
         if (!fe) {
             pthread_mutex_lock(&c->prune_done_mutex);
-            done = c->prune_done;
+            uint8_t done = c->prune_done;
             pthread_mutex_unlock(&c->prune_done_mutex);
             if (done) {
-                break;
+                // Publishing prune_done follows the final queue insertion.
+                // Recheck in case that insertion raced with our empty read.
+                SYNC(c->queue_mutex, {
+                    fe = file_entry_next(c->queue);
+                });
+                if (!fe) break;
             }
-
-            usleep(100);
-            continue;
+            if (!fe) {
+                usleep(100);
+                continue;
+            }
         }
 
         // Decrement queued_count for work_queue pop
@@ -874,9 +892,9 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
 }
 
 __attribute__((noreturn))
-static void usage(char* pgm, DedupContext* ctx) {
+static void usage(char* pgm, DedupContext* ctx, int status) {
     fprintf(stderr,
-            "%s\nusage: %s [-I pattern] [-t n] [-PVcmnvx] [-d n] [file ...]\n\n"
+            "%s\nusage: %s [-t n] [-PVhlmnsvxC] [-d n] [-F format] [-S file] [file ...]\n\n"
                 "Options:\n"
                 // "  --ignore, -I pattern     Exclude a pattern from being used as a clone\n"
                 // "                           source or being replaced by a clone. This option\n"
@@ -884,7 +902,7 @@ static void usage(char* pgm, DedupContext* ctx) {
                 "  --dry-run, -n            Don't replace file content; just print what \n"
                 "                           would have happened.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
-                "  --format, -F format      Output format for byte sizes. See --help formats.\n"
+                "  --format, -F format      Output format for byte sizes.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
                 "                           than the starting paths.\n"
                 "  --link, -l               Use hardlinks instead of clones.\n"
@@ -892,8 +910,7 @@ static void usage(char* pgm, DedupContext* ctx) {
                 // "  --color, -c              Enabled colored output.\n"
                 "  --no-progress, -P        Do not display a progress bar.\n"
                 "  --no-clone-conversion    Do not convert clones (skip clone mode)\n"
-                "  --summary, -S file       Write detailed cloning summary to file\n"
-                "                           (itemized by directory hierarchy)\n"
+                "  --summary, -S file       Write cloning summary to a new file.\n"
                 "  --threads, -t n          The number of threads to use for file building\n"
                 "                           lookup tables and replacing clones. Default: %d\n"
                 "  --parent-mtime, -m       Preserve the mtime of any parent directory\n"
@@ -907,7 +924,21 @@ static void usage(char* pgm, DedupContext* ctx) {
             pgm,
             ctx->thread_count);
 
-    exit(1);
+    list_available_formats(stderr);
+    exit(status);
+}
+
+static unsigned long parse_count(const char* value, unsigned long maximum,
+                                const char* label) {
+    char* end = NULL;
+    errno = 0;
+    unsigned long result = strtoul(value, &end, 10);
+    if (!value[0] || strspn(value, "0123456789") != strlen(value) ||
+        errno == ERANGE || !end || *end || result > maximum) {
+        errx(EXIT_FAILURE, "%s must be an integer from 0 to %lu: %s",
+             label, maximum, value);
+    }
+    return result;
 }
 
 __attribute__((const))
@@ -915,7 +946,7 @@ int32_t cpu_count() {
     int32_t c = 0;
     size_t len = sizeof(int32_t);
     sysctlbyname("hw.ncpu", &c, &len, NULL, 0);
-    return c;
+    return c < 1 ? 1 : (c > UINT8_MAX ? UINT8_MAX : c);
 }
 
 #if defined(__APPLE__)
@@ -983,6 +1014,15 @@ bool are_acls_supported(char* path) {
     (void)path;
     return true;
 #endif
+}
+
+static int traversal_order(const FTSENT** a, const FTSENT** b) {
+    // Preserve existing hard-link groups by considering them as sources
+    // before replaceable siblings. Break ties consistently across runs.
+    nlink_t a_links = ((*a)->fts_info == FTS_F) ? (*a)->fts_statp->st_nlink : 0;
+    nlink_t b_links = ((*b)->fts_info == FTS_F) ? (*b)->fts_statp->st_nlink : 0;
+    if (a_links != b_links) return a_links > b_links ? -1 : 1;
+    return strcmp((*a)->fts_name, (*b)->fts_name);
 }
 
 int main(int argc, char* argv[]) {
@@ -1056,14 +1096,13 @@ int main(int argc, char* argv[]) {
         // { "force",           no_argument,       NULL, 'f' },
         { "no-clone-conversion", no_argument,   NULL, 'C' },
         { "summary",         required_argument, NULL, 'S' },
-        { "help",            no_argument,       NULL, '?' },
+        { "help",            no_argument,       NULL, 256 },
         { NULL, 0, NULL, 0 },
     };
 
     bool human_readable = true;
 
-    int ch = -1, t;
-    short d;
+    int ch = -1;
     while ((ch = getopt_long(argc, argv, "I:PVc::d:F:fhlmnst:vxCS:?", options, NULL)) != -1) {
         switch (ch) {
             case 'I':
@@ -1074,18 +1113,12 @@ int main(int argc, char* argv[]) {
                 break;
             case 'V':
                 fprintf(stderr, "%s\n", version);
-                return 1;
+                return 0;
             case 'c':
                 fprintf(stderr, "-c is unimplemented\n");
                 break;
             case 'd':
-                d = atoi(optarg);
-                if (d < 0) {
-                    fprintf(stderr, "Depth must be a positive value: %s\n",
-                            optarg);
-                    usage(argv[0], &dc);
-                }
-                max_depth = d;
+                max_depth = parse_count(optarg, UINT16_MAX, "Depth");
                 break;
             case 'F':
                 dc.output_format = parse_output_format(optarg);
@@ -1106,14 +1139,7 @@ int main(int argc, char* argv[]) {
                 dc.replace_mode = DEDUP_SYMLINK;
                 break;
             case 't':
-                t = atoi(optarg);
-                if (t < 0) {
-                    fprintf(stderr,
-                            "Thread count must be a positive value: %s\n",
-                            optarg);
-                    usage(argv[0], &dc);
-                }
-                dc.thread_count = t;
+                dc.thread_count = parse_count(optarg, UINT8_MAX, "Thread count");
                 break;
             case 'v':
                 dc.verbosity++;
@@ -1125,17 +1151,23 @@ int main(int argc, char* argv[]) {
                 dc.clone_converted = false;
                 break;
             case 'S':
-                dc.summary_file = strdup(optarg);
+                dc.summary_file = optarg;
                 break;
+            case 256:
+                usage(argv[0], &dc, EXIT_SUCCESS);
             case '?':
+                if (optind > 0 && strcmp(argv[optind - 1], "-?") == 0) {
+                    usage(argv[0], &dc, EXIT_SUCCESS);
+                }
+                usage(argv[0], &dc, EXIT_FAILURE);
             default:
-                usage(argv[0], &dc);
+                usage(argv[0], &dc, EXIT_FAILURE);
         }
     }
     argc -= optind;
     argv += optind;
 
-    if (!isatty(STDOUT_FILENO)) {
+    if (!isatty(STDERR_FILENO)) {
         dc.progress = NULL;
     }
     
@@ -1149,11 +1181,6 @@ int main(int argc, char* argv[]) {
         dedup_runtime_dispatch_print_verbose();
     }
     
-    // Open summary file if requested
-    if (dc.summary_file) {
-        clone_summary_open(dc.summary_file);
-    }
-
     static const char* const DEFAULT_PATHS[] = {
         ".",
         NULL,
@@ -1173,7 +1200,7 @@ int main(int argc, char* argv[]) {
 
     FTS* traversal = fts_open(paths,
                               FTS_NOCHDIR | FTS_PHYSICAL | user_fts_options,
-                              NULL);
+                              traversal_order);
 
     // n.b! as of Libc-1244.1.7 fts_open will only fail if it cannot
     //      allocate memory. this makes this check extremely unlikely
@@ -1186,23 +1213,40 @@ int main(int argc, char* argv[]) {
     }
     // LCOV_EXCL_STOP
 
-    pthread_t pruner_thread = NULL;
-    if (dc.thread_count > 0) {
-        int r = pthread_create(&pruner_thread, NULL, prune_work, &dc);
-        if (r) {
-            warn("Could not create pruner thread: error %i", r);
-            pruner_thread = NULL;
+    struct stat summary_stat = {0};
+    if (dc.summary_file) {
+        if (clone_summary_open(dc.summary_file) != 0 ||
+            fstat(fileno(clone_summary_stream), &summary_stat) != 0) {
+            warn("cannot create summary %s", dc.summary_file);
+            clone_summary_close();
+            fts_close(traversal);
+            return 1;
         }
     }
 
     pthread_t* threads = calloc(dc.thread_count, sizeof(pthread_t));
+    if (!threads) dc.thread_count = 0;
     for (int i = 0; i < dc.thread_count; i++) {
         int r = pthread_create(&threads[i], NULL, dedup_work, &dc);
         if (r) {
-            warn("Could not create threads: error %i\nRunning single threaded.",
-                 r);
+            warnx("Could not create worker: %s; using %d workers", strerror(r), i);
             dc.thread_count = i;
             break;
+        }
+    }
+
+    pthread_t pruner_thread = NULL;
+    if (dc.thread_count > 0) {
+        int r = pthread_create(&pruner_thread, NULL, prune_work, &dc);
+        if (r) {
+            warnx("Could not create pruner: %s; running serially", strerror(r));
+            pruner_thread = NULL;
+            pthread_mutex_lock(&dc.prune_done_mutex);
+            dc.prune_done = 1;
+            pthread_mutex_unlock(&dc.prune_done_mutex);
+            for (int i = 0; i < dc.thread_count; i++) pthread_join(threads[i], NULL);
+            dc.thread_count = 0;
+            dc.prune_done = 0;
         }
     }
 
@@ -1219,14 +1263,7 @@ int main(int argc, char* argv[]) {
     FTSENT* entry = NULL;
     while ((entry = fts_read(traversal)) != NULL) {
         if (entry->fts_errno) {
-            char* e = strerror(entry->fts_errno);
-            PROGRESS_LOCK(dc.progress, dc.progress_mutex, {
-                clear_progress();
-                warnx("%s: error (%d): %s",
-                      entry->fts_path,
-                      entry->fts_errno,
-                      e);
-            });
+            report_error(&dc, entry->fts_path, "cannot traverse", entry->fts_errno);
             display_status(&dc, entry->fts_path);
             continue;
         }
@@ -1273,16 +1310,19 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // Never deduplicate an output stream that this process is still writing.
+        if (dc.summary_file && entry->fts_statp->st_dev == summary_stat.st_dev &&
+            entry->fts_statp->st_ino == summary_stat.st_ino) {
+            continue;
+        }
+
         // the file cannot be empty
         if (entry->fts_statp->st_size == 0) {
             continue;
         }
 
         // the file looks like a previously failed clone
-        if (strnlen(entry->fts_path, PATH_MAX) > 3 &&
-            entry->fts_path[0] == '.' &&
-            entry->fts_path[1] == '~' &&
-            entry->fts_path[2] == '.') {
+        if (strncmp(entry->fts_name, ".~.", 3) == 0) {
             continue;
         }
 
@@ -1335,11 +1375,6 @@ int main(int argc, char* argv[]) {
                                     sequence,
                                     entry->fts_level);
             FileEntry* fe = file_entry_next(raw_queue);
-            // Decrement queued_count since we're processing it immediately
-            pthread_mutex_lock(&dc.metrics_mutex);
-            dc.queued_count--;
-            pthread_mutex_unlock(&dc.metrics_mutex);
-            
             if (prune_entry(fe, st_seen_inodes, st_seen_clones, &dc)) {
                 file_entry_free(fe);
             } else {
@@ -1394,7 +1429,7 @@ int main(int argc, char* argv[]) {
     dc.prune_done = 1;
     pthread_mutex_unlock(&dc.prune_done_mutex);
 
-    for (int i = 0; i < dc.thread_count; i++) {
+    for (int i = 0; threads && i < dc.thread_count; i++) {
         // clang-analyzer thinks threads[i] can be NULL, but `pthread_t`
         // is an opaque type (to us). if `pthread_create` is successful
         // the API contract says we can pass that value to pthread_join.
@@ -1439,14 +1474,14 @@ int main(int argc, char* argv[]) {
     putchar('\n');
 
     // Clear status line
-    if (isatty(STDOUT_FILENO)) {
+    if (dc.progress) {
         fprintf(stderr, "\r\033[K\n");
     }
     
     // Close summary file if it was opened
-    if (dc.summary_file) {
-        clone_summary_close();
+    if (dc.summary_file && clone_summary_close() != 0) {
+        report_error(&dc, dc.summary_file, "cannot write summary", EIO);
     }
 
-    return 0;
+    return dc.errors ? EXIT_FAILURE : EXIT_SUCCESS;
 }

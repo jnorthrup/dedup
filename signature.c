@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,6 +30,18 @@ static inline uint64_t rotl64(uint64_t x, int r) {
     return (x << r) | (x >> (64 - r));
 }
 
+static uint64_t read_u64(const uint8_t* p) {
+    uint64_t value;
+    memcpy(&value, p, sizeof(value));
+    return value;
+}
+
+static uint32_t read_u32(const uint8_t* p) {
+    uint32_t value;
+    memcpy(&value, p, sizeof(value));
+    return value;
+}
+
 uint64_t signature_fast_hash_bytes(const void* data, size_t len) {
     const uint8_t* p = (const uint8_t*)data;
     const uint8_t* const end = p + len;
@@ -42,10 +55,10 @@ uint64_t signature_fast_hash_bytes(const void* data, size_t len) {
         uint64_t v4 = -(int64_t)PRIME64_1;
 
         do {
-            v1 += *(uint64_t*)p * PRIME64_2; v1 = rotl64(v1, 31); v1 *= PRIME64_1; p += 8;
-            v2 += *(uint64_t*)p * PRIME64_2; v2 = rotl64(v2, 31); v2 *= PRIME64_1; p += 8;
-            v3 += *(uint64_t*)p * PRIME64_2; v3 = rotl64(v3, 31); v3 *= PRIME64_1; p += 8;
-            v4 += *(uint64_t*)p * PRIME64_2; v4 = rotl64(v4, 31); v4 *= PRIME64_1; p += 8;
+            v1 += read_u64(p) * PRIME64_2; v1 = rotl64(v1, 31); v1 *= PRIME64_1; p += 8;
+            v2 += read_u64(p) * PRIME64_2; v2 = rotl64(v2, 31); v2 *= PRIME64_1; p += 8;
+            v3 += read_u64(p) * PRIME64_2; v3 = rotl64(v3, 31); v3 *= PRIME64_1; p += 8;
+            v4 += read_u64(p) * PRIME64_2; v4 = rotl64(v4, 31); v4 *= PRIME64_1; p += 8;
         } while (p <= limit);
 
         h64 = rotl64(v1, 1) + rotl64(v2, 7) + rotl64(v3, 12) + rotl64(v4, 18);
@@ -60,15 +73,15 @@ uint64_t signature_fast_hash_bytes(const void* data, size_t len) {
 
     h64 += (uint64_t)len;
 
-    while (p + 8 <= end) {
-        uint64_t k1 = *(uint64_t*)p;
+    while ((size_t)(end - p) >= 8) {
+        uint64_t k1 = read_u64(p);
         k1 *= PRIME64_2; k1 = rotl64(k1, 31); k1 *= PRIME64_1;
         h64 ^= k1; h64 = rotl64(h64, 27) * PRIME64_1 + PRIME64_4;
         p += 8;
     }
 
-    if (p + 4 <= end) {
-        h64 ^= (uint64_t)(*(uint32_t*)p) * PRIME64_1;
+    if ((size_t)(end - p) >= 4) {
+        h64 ^= (uint64_t)read_u32(p) * PRIME64_1;
         h64 = rotl64(h64, 23) * PRIME64_2 + PRIME64_3;
         p += 4;
     }
@@ -87,6 +100,25 @@ uint64_t signature_fast_hash_bytes(const void* data, size_t len) {
     return h64;
 }
 
+static bool read_exact_at(int fd, void* buffer, size_t size, off_t offset) {
+    size_t done = 0;
+    while (done < size) {
+        ssize_t n = pread(fd, (unsigned char*)buffer + done, size - done,
+                          offset + (off_t)done);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        if (n <= 0) {
+            if (n == 0) {
+                errno = EIO;
+            }
+            return false;
+        }
+        done += (size_t)n;
+    }
+    return true;
+}
+
 static bool read_sample_into(int fd, off_t position, uint64_t size, int32_t* out) {
     unsigned char raw[sizeof(int32_t)] = {0};
     size_t remaining = 0;
@@ -97,8 +129,7 @@ static bool read_sample_into(int fd, off_t position, uint64_t size, int32_t* out
 
     remaining = (size_t)(size - (uint64_t)position);
     size_t to_read = remaining < sizeof(raw) ? remaining : sizeof(raw);
-    ssize_t n = pread(fd, raw, to_read, position);
-    if (n < 0 || (size_t)n != to_read) {
+    if (!read_exact_at(fd, raw, to_read, position)) {
         return false;
     }
 
@@ -107,6 +138,10 @@ static bool read_sample_into(int fd, off_t position, uint64_t size, int32_t* out
 }
 
 FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) {
+    if (!path) {
+        errno = EINVAL;
+        return NULL;
+    }
     FileSignature* sig = calloc(1, sizeof(FileSignature));
     if (!sig) {
         return NULL;
@@ -115,16 +150,23 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     sig->device = device;
     sig->size = size;
 
+    char* buf = NULL;
     int fd = open(path, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
-        free(sig);
-        return NULL;
+        goto error;
     }
 
-    // Clear O_NONBLOCK for actual I/O operations
-    int flags = fcntl(fd, F_GETFL);
-    if (flags >= 0) {
-        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    struct stat st = {0};
+    if (fstat(fd, &st) != 0) {
+        goto error;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+        errno = EINVAL;
+        goto error;
+    }
+    if ((uint64_t)st.st_size != size || st.st_dev != device) {
+        errno = ESTALE;
+        goto error;
     }
 
     if (size == 0) {
@@ -137,48 +179,38 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     off_t positions[4] = {
         0,                               // Start
         (off_t)(size / 3),               // 1/3 point
-        (off_t)((size * 2) / 3),         // 2/3 point
+        (off_t)((size / 3) * 2 + ((size % 3) * 2) / 3), // 2/3 point
         (off_t)(size > 4 ? size - 4 : 0) // End (or start if file < 4 bytes)
     };
 
 #ifdef __ARM_NEON
     if (size >= 16) {
-        char buf[16] __attribute__((aligned(16)));
+        char samples_buf[16] __attribute__((aligned(16)));
         for (int i = 0; i < 4; i++) {
-            if (pread(fd, &buf[i * 4], 4, positions[i]) != 4) {
-                close(fd);
-                free(sig);
-                return NULL;
+            if (!read_exact_at(fd, &samples_buf[i * 4], 4, positions[i])) {
+                goto error;
             }
         }
-        int32x4_t samples_vec = vld1q_s32((int32_t*)buf);
+        int32x4_t samples_vec = vld1q_s32((int32_t*)samples_buf);
         vst1q_s32(sig->samples, samples_vec);
     } else
 #endif
     {
         for (int i = 0; i < 4; i++) {
             if (!read_sample_into(fd, positions[i], size, &sig->samples[i])) {
-                close(fd);
-                free(sig);
-                return NULL;
+                goto error;
             }
         }
     }
 
     size_t hash_size = size < 4096 ? (size_t)size : 4096U;
-    char* buf = malloc(hash_size);
+    buf = malloc(hash_size);
     if (!buf) {
-        close(fd);
-        free(sig);
-        return NULL;
+        goto error;
     }
 
-    ssize_t n = pread(fd, buf, hash_size, 0);
-    if (n < 0 || (size_t)n != hash_size) {
-        free(buf);
-        close(fd);
-        free(sig);
-        return NULL;
+    if (!read_exact_at(fd, buf, hash_size, 0)) {
+        goto error;
     }
 
     dedup_fast_hash_fn hash_fn = signature_fast_hash_bytes;
@@ -186,12 +218,23 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     if (dispatch && dispatch->fast_hash) {
         hash_fn = dispatch->fast_hash;
     }
-    sig->quick_hash = hash_fn(buf, (size_t)n);
+    sig->quick_hash = hash_fn(buf, hash_size);
 
     free(buf);
     close(fd);
 
     return sig;
+
+error: {
+    int saved_errno = errno;
+    free(buf);
+    if (fd >= 0) {
+        close(fd);
+    }
+    free(sig);
+    errno = saved_errno;
+    return NULL;
+}
 }
 
 void free_signature(FileSignature* sig) {
@@ -218,17 +261,36 @@ bool signatures_match(const FileSignature* a, const FileSignature* b) {
 #endif
 }
 
+static bool file_snapshot_unchanged(int fd, const struct stat* before) {
+    struct stat after = {0};
+    if (fstat(fd, &after) != 0 || before->st_dev != after.st_dev ||
+        before->st_ino != after.st_ino || before->st_size != after.st_size) {
+        return false;
+    }
+#if defined(__APPLE__)
+    return before->st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+           before->st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
+           before->st_ctimespec.tv_sec == after.st_ctimespec.tv_sec &&
+           before->st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec;
+#else
+    return before->st_mtim.tv_sec == after.st_mtim.tv_sec &&
+           before->st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+           before->st_ctim.tv_sec == after.st_ctim.tv_sec &&
+           before->st_ctim.tv_nsec == after.st_ctim.tv_nsec;
+#endif
+}
+
 static bool files_match_exact_impl(const char* a_path, const char* b_path, size_t chunk_size, bool use_xor_or) {
     if (!a_path || !b_path || chunk_size == 0) {
         return false;
     }
 
-    int a_fd = open(a_path, O_RDONLY);
+    int a_fd = open(a_path, O_RDONLY | O_NONBLOCK);
     if (a_fd < 0) {
         return false;
     }
 
-    int b_fd = open(b_path, O_RDONLY);
+    int b_fd = open(b_path, O_RDONLY | O_NONBLOCK);
     if (b_fd < 0) {
         close(a_fd);
         return false;
@@ -242,7 +304,8 @@ static bool files_match_exact_impl(const char* a_path, const char* b_path, size_
         goto cleanup;
     }
 
-    if (a_st.st_size != b_st.st_size) {
+    if (!S_ISREG(a_st.st_mode) || !S_ISREG(b_st.st_mode) ||
+        a_st.st_size < 0 || a_st.st_size != b_st.st_size) {
         goto cleanup;
     }
 
@@ -264,9 +327,8 @@ static bool files_match_exact_impl(const char* a_path, const char* b_path, size_
     while (offset < a_st.st_size) {
         size_t remaining = (size_t)(a_st.st_size - offset);
         size_t to_read = remaining < chunk_size ? remaining : chunk_size;
-        ssize_t a_read = pread(a_fd, a_buf, to_read, offset);
-        ssize_t b_read = pread(b_fd, b_buf, to_read, offset);
-        if (a_read < 0 || b_read < 0 || a_read != b_read || (size_t)a_read != to_read) {
+        if (!read_exact_at(a_fd, a_buf, to_read, offset) ||
+            !read_exact_at(b_fd, b_buf, to_read, offset)) {
             equal = false;
             break;
         }
@@ -308,11 +370,14 @@ static bool files_match_exact_impl(const char* a_path, const char* b_path, size_
             break;
         }
 
-        offset += a_read;
+        offset += (off_t)to_read;
     }
 
     free(a_buf);
     free(b_buf);
+    if (equal) {
+        equal = file_snapshot_unchanged(a_fd, &a_st) && file_snapshot_unchanged(b_fd, &b_st);
+    }
 
 cleanup:
     close(a_fd);

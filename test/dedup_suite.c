@@ -171,7 +171,7 @@ START_TEST(dedup_negative_threads) {
 
 START_TEST(dedup_help) {
     int r = system("../dedup --help");
-    ck_assert_int_eq(1, WEXITSTATUS(r));
+    ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 
 START_TEST(dedup_dry_run) {

@@ -55,15 +55,16 @@ int replace_with_clone(const char* src, const char* dst, bool preserve_parent_mt
 
 /// replace_with_link
 ///
-/// The `replae_with_link` function causes the link named `dst` to be
-/// replaced with a hardlink of `src`. `src` and `dst` must be on the same
+/// The `replace_with_link` function causes the link named `dst` to be
+/// atomically replaced with a hardlink of `src`. `src` and `dst` must be on the same
 /// volume.
 ///
 /// On success `dst` will be replaced and `replace_with_link` returns 0.
 ///
-/// On failure `link(2)` will return an error.
+/// On failure the original destination is retained and an errno value
+/// is returned.
 ///
-/// See also: `link(2)`
+/// See also: `link(2)`, `rename(2)`
 int replace_with_link(const char* src, const char* dst);
 
 /// replace_with_symlink

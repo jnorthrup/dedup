@@ -62,7 +62,7 @@ OBJECTS = \
 
 .PHONY: \
     all install uninstall clean check dist distcheck \
-    check-build check-test check-linux \
+    check-build check-test check-fast check-linux \
     check-spelling check-spelling-man check-spelling-readme \
     leaks-build \
     clean-coverage report-coverage \
@@ -131,7 +131,11 @@ check-build: CFLAGS += \
 check-build: leaks-build
 check-test: check-build
 	cd test && make check
-check: check-test tidy check-spelling
+check: check-test check-fast tidy check-spelling
+
+# Self-contained regressions: no disk-image setup or mounted test volumes.
+check-fast: dedup
+	$(MAKE) -C test check-fast
 
 check-linux:
 	cd test && $(MAKE) check-linux
@@ -197,13 +201,13 @@ check-spelling-man: dedup.1 dict
         tr '”' ' ' | \
 	    aspell list $(AFLAGS) --mode nroff | \
 	    sort -u | \
-	    xargs -n 1 printf "\\033[0;31m$< >>>\033[0m %s\n")
+	    awk 'NF { printf "\033[0;31m$< >>>\033[0m %s\n", $$0 }')
 
 check-spelling-readme: README.md dict
 	! grep . <<< $$(cat README.md | \
 	    aspell list $(AFLAGS) --mode markdown | \
 	    sort -u | \
-	    xargs -n 1 printf "\\033[0;31m$< >>>\033[0m %s\n")
+	    awk 'NF { printf "\033[0;31m$< >>>\033[0m %s\n", $$0 }')
 
 check-spelling: check-spelling-readme check-spelling-man
 
@@ -246,4 +250,5 @@ list:
 	@echo ""
 	@echo "    check-spelling - check spelling of README.md & dedup.1 using aspell"
 	@echo "    tidy - run clang-tidy on sources"
+	@echo "    check-fast - run self-contained safety, comparison, formatting and CLI tests"
 	@echo "    report-coverage - generate a coverage report using lcov"

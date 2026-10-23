@@ -13,5 +13,7 @@ dedup.x86_64
 dedup.universal
 test/test-data
 test/dedup_check
+test/output_format_check
+test/seen_set_check
 .cache/
 ubifs/libubt.a

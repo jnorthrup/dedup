@@ -81,7 +81,7 @@ static const char* format_with_units(uint64_t bytes, const UnitInfo* units, int 
     const UnitInfo* unit = units;
 
     // Find the appropriate unit
-    while (unit->short_name && value >= unit[1].divisor) {
+    while (unit[1].short_name && value >= unit[1].divisor) {
         unit++;
     }
 

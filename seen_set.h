@@ -36,8 +36,9 @@ typedef struct SeenSet SeenSet;
 SeenSet* new_seen_set(size_t capacity);
 void free_seen_set(SeenSet* set);
 
-/// Insert a key into the set.
-/// Returns true if the key was already present (i.e., duplicate).
-bool seen_set_insert(SeenSet* set, uint64_t key);
+/// Insert an exact device/identifier pair into the set.
+/// Returns true only if the same pair was already present. A null set or
+/// allocation failure returns false, so callers never prune an unseen file.
+bool seen_set_insert(SeenSet* set, uint64_t device, uint64_t id);
 
 #endif // __DEDUP_SEEN_SET_H__

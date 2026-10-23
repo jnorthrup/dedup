@@ -48,9 +48,11 @@ on disk. Unlike a hard linked file, any future modification to either the clone
 or the original file will be remain private to that file (copy-on-write).
 .Pp
 .Nm
-works in two phases. First it evaluates all of the paths provided
-recursively, looking for duplicates. Once all duplicates are found, any files
-that are not already clones of "best" clone source are replaced with clones.
+scans paths recursively, using sampled signatures to select candidate matches.
+It compares complete contents byte for byte before replacing a duplicate.
+Replacements happen during traversal, using the first matching source. Within
+each directory, files with more hard links are considered first, with names
+breaking ties.
 .Pp
 There are limits which files can be cloned:
 .Bl -enum -offset indent
@@ -62,14 +64,9 @@ the file must have only one hard link
 the file and its directory must be writable by the user
 .El
 .Pp
-The "best" source is chosen by first finding the file with the most hard links.
-Files with multiple hard links will not be replaced, so using them as the source
-of other clones allows their blocks to be shared without modifying the data to
-which they point. If all files have a single link, a file which shares the most
-clones with others is chosen. This ensures that files which have been previously
-processed will not need to be replaced during subsequent evaluations of the same
-directory. If none of the files have multiple links or clones, the first file
-encountered will be chosen.
+Existing clones are skipped in clone mode. Files with multiple hard links may
+be sources but are not replaced. Hard-link and symbolic-link modes also process
+files that already share clone data.
 .Pp
 Files with multiple hard links are not replaced because it is not possible to
 guarantee all other links to that inode exist within the tree(s) being
@@ -112,12 +109,14 @@ The following options are available:
 .It Fl d Ar depth , Fl Fl depth Ar depth
 Only traverse
 .Ar depth
-directories deep into each provided path.
+directories deep into each provided path. Accepts integers from 0 to 65535.
 .It Fl h
 Display sizes using SI suffixes with 2-4 digits of precision.
 .It Fl n , Fl Fl dry-run
 Evaluate all files and find all duplicates but only print what would be done
-and do not modify any files.
+and do not replace any files. Add
+.Fl v
+to list planned replacements.
 .It Fl l , Fl Fl link
 Replace duplicate files with hard links instead of clones. Replaced files will
 not retain their metadata.
@@ -133,7 +132,17 @@ as the number of CPUs on the host as described by the
 value returned by
 .Xr sysctl 8 .
 If the value 0 is provided all evaluation will be done serially in the main
-thread.
+thread. Accepts integers from 0 to 255.
+.It Fl F Ar format , Fl Fl format Ar format
+Select byte-size formatting, such as raw, si, or binary.
+.Fl Fl help
+lists available formats.
+.It Fl S Ar file , Fl Fl summary Ar file
+Write completed replacements to a new summary file. Existing paths are rejected
+and the summary is excluded from scanning. Failure to create or write it returns
+an error.
+.It Fl C , Fl Fl no-clone-conversion
+Skip replacements in clone mode, including dry-run estimates.
 .It Fl V , Fl Fl version
 Print the version and exit
 .It Fl v , Fl Fl verbose
@@ -177,7 +186,7 @@ can be used to find these temporary files if necessary.
 Find all duplicates and display which files would be replaced by clones along
 with the estimated space that would be saved:
 .Pp
-.Dl $ dedup -n
+.Dl $ dedup -nv
 .Pp
 Limit execution to a single thread, disable progress, and display human readable
 output while deduplicating files in `~/Downloads` and `/tmp`

@@ -5,6 +5,8 @@
 #include "runtime_caps.h"
 
 #include <stdio.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -15,7 +17,8 @@
 #endif
 
 static DedupRuntimeCaps g_runtime_caps;
-static bool g_runtime_caps_initialized = false;
+static atomic_bool g_runtime_caps_initialized = false;
+static pthread_mutex_t g_runtime_caps_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_memcmp_bench_sink = 0;
 static volatile int g_exact_bench_sink = 0;
 
@@ -199,17 +202,24 @@ static void populate_capabilities(DedupRuntimeCaps* caps) {
 }
 
 const DedupRuntimeCaps* dedup_runtime_caps_get(void) {
-    if (!g_runtime_caps_initialized) {
-        populate_capabilities(&g_runtime_caps);
-        g_runtime_caps_initialized = true;
+    if (!atomic_load_explicit(&g_runtime_caps_initialized, memory_order_acquire)) {
+        pthread_mutex_lock(&g_runtime_caps_mutex);
+        if (!atomic_load_explicit(&g_runtime_caps_initialized, memory_order_relaxed)) {
+            populate_capabilities(&g_runtime_caps);
+            atomic_store_explicit(&g_runtime_caps_initialized, true, memory_order_release);
+        }
+        pthread_mutex_unlock(&g_runtime_caps_mutex);
     }
 
     return &g_runtime_caps;
 }
 
 void dedup_runtime_caps_reset_for_tests(void) {
+    // Test resets require all users of the returned capabilities to be idle.
+    pthread_mutex_lock(&g_runtime_caps_mutex);
     memset(&g_runtime_caps, 0, sizeof(g_runtime_caps));
-    g_runtime_caps_initialized = false;
+    atomic_store_explicit(&g_runtime_caps_initialized, false, memory_order_release);
+    pthread_mutex_unlock(&g_runtime_caps_mutex);
 }
 
 void dedup_runtime_caps_print_verbose(void) {

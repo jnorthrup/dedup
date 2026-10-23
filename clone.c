@@ -37,7 +37,6 @@
 #include <linux/fs.h>
 #endif
 
-#include <err.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
@@ -77,6 +76,10 @@ static int find_zero_file(const char* restrict path) {
 // Expects `out` to be char[PATH_MAX].
 //
 char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
+    if (size == 0) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
     out[0] = '\0';
 
     char dir[PATH_MAX] = { 0 };
@@ -96,12 +99,16 @@ char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
         return NULL;
     }
 
-    if (access(out, F_OK) == 0) {
+    struct stat st;
+    if (lstat(out, &st) == 0) {
         fprintf(stderr,
-                "Staging file %s already exists. Remove it to replace %s with a clone\n",
+                "Staging file %s already exists. Remove it to replace %s\n",
                 out,
                 path);
         errno = EEXIST;
+        return NULL;
+    }
+    if (errno != ENOENT) {
         return NULL;
     }
 
@@ -118,6 +125,8 @@ static int genfile_clone(const char* src, const char* dst) {
     int e = errno;
     close(src_fd);
     close(dst_fd);
+    if (r) unlink(dst);
+    errno = e;
     return r ? e : 0;
 #elif defined(__APPLE__)
     return clonefile(src, dst, 0);
@@ -133,9 +142,11 @@ static int genfile_clone(const char* src, const char* dst) {
         perror("open(2) failed");
         return errno;
     }
-    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL);
+    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (dst_fd < 0) {
+        int e = errno;
         close(src_fd);
+        errno = e;
         perror("open(2) failed");
         return errno;
     }
@@ -143,6 +154,7 @@ static int genfile_clone(const char* src, const char* dst) {
     int errno_saved = errno;
     close(src_fd);
     close(dst_fd);
+    if (result) unlink(dst);
     errno = errno_saved;
     return result;
 #elif defined(__linux__)
@@ -154,6 +166,8 @@ static int genfile_clone(const char* src, const char* dst) {
     int e = errno;
     close(s);
     close(d);
+    if (r) unlink(dst);
+    errno = e;
     return r ? e : 0;
 #else
 #error Operating system not supported.
@@ -241,7 +255,8 @@ int replace_with_clone(const char* src, const char* dst, bool preserve_parent_mt
 
     if (result) {
         perror("could not clonefile");
-        unlink(path); // if it exists
+        // clonefile is atomic; the ioctl backends clean up files they
+        // created themselves. This path may belong to another process.
         goto cleanup;
     }
 
@@ -289,9 +304,10 @@ int replace_with_clone(const char* src, const char* dst, bool preserve_parent_mt
     {
         struct stat src_sb, dst_sb;
         if (stat(src, &src_sb) || stat(path, &dst_sb)) {
+            result = errno;
             perror("stat(2) failed during clone verification");
             unlink(path);
-            return errno;
+            goto cleanup;
         }
         if (src_sb.st_size != dst_sb.st_size) {
             fprintf(stderr,
@@ -299,7 +315,8 @@ int replace_with_clone(const char* src, const char* dst, bool preserve_parent_mt
                     (size_t)src_sb.st_size,
                     (size_t)dst_sb.st_size);
             unlink(path);
-            return EIO;
+            result = EIO;
+            goto cleanup;
         }
     }
 #endif
@@ -323,14 +340,20 @@ cleanup:
 
 
 int replace_with_link(const char* src, const char* dst) {
-    // TODO: should this atomically move a tmp file instead of
-    //       two step an unlink and link?
-    if (unlink(dst)) {
-        warn("%s", dst);
-        return 1;
+    char tmp[PATH_MAX];
+    if (!tmp_name(dst, tmp, sizeof(tmp))) {
+        return errno;
     }
 
-    return link(src, dst);
+    if (link(src, tmp)) {
+        return errno;
+    }
+
+    int result = rename(tmp, dst) ? errno : 0;
+    // rename is a no-op when dst already names the source inode. Remove
+    // the extra staging link in that case, and after a failed rename.
+    unlink(tmp);
+    return result;
 }
 
 // returns a relative path to dst from src
@@ -354,8 +377,6 @@ char* path_relative_to(const char* src, const char* dst) {
     // consume root '/' if it exists
     if (*real_src == '/') real_src++;
     if (*real_dst == '/') real_dst++;
-
-    int depth = 0;
 
     // consume common directories
     do {
@@ -389,21 +410,27 @@ char* path_relative_to(const char* src, const char* dst) {
         real_dst = dst_dir_end + 1;
     } while (true);
 
-    for (char* end = real_src; end != NULL && *end != '\0'; end = strchr(end, '/')) {
-        end++;
-        depth++;
+    size_t depth = 0;
+    for (const char* end = real_src; *end != '\0'; end++) {
+        if (*end == '/') depth++;
     }
-    depth--;
 
     free(orig_real_src);
-    char* path = calloc(PATH_MAX, 1);
-    int pos = 0;
-    for (int i = 0; i < depth; i++) {
+    // Two individually valid absolute paths can need a relative path
+    // longer than PATH_MAX (each parent component expands to "../").
+    size_t suffix_len = strlen(real_dst);
+    char* path = malloc(depth * 3 + suffix_len + 1);
+    if (!path) {
+        free(orig_real_dst);
+        return NULL;
+    }
+    size_t pos = 0;
+    for (size_t i = 0; i < depth; i++) {
         path[pos++] = '.';
         path[pos++] = '.';
         path[pos++] = '/';
     }
-    memcpy(path + pos, real_dst, strlen(real_dst));
+    memcpy(path + pos, real_dst, suffix_len + 1);
     free(orig_real_dst);
 
     return path;

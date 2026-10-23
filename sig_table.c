@@ -9,6 +9,9 @@
 #include "runtime_dispatch.h"
 
 SigTable* new_sig_table(size_t bucket_count) {
+    if (bucket_count == 0) {
+        return NULL;
+    }
     SigTable* table = calloc(1, sizeof(SigTable));
     if (!table) {
         return NULL;
@@ -47,7 +50,7 @@ void free_sig_table(SigTable* table) {
 }
 
 SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char* path, uint64_t clone_id) {
-    if (!table || !sig || !path) {
+    if (!table || !table->buckets || table->bucket_count == 0 || !sig || !path) {
         return NULL;
     }
 
@@ -73,8 +76,12 @@ SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char*
         return NULL;
     }
 
-    new_entry->signature = sig;  // Takes ownership
     new_entry->path = strdup(path);
+    if (!new_entry->path) {
+        free(new_entry);
+        return NULL;
+    }
+    new_entry->signature = sig;  // Takes ownership only after allocation succeeds
     new_entry->clone_id = clone_id;
     new_entry->next = table->buckets[bucket_idx];
 

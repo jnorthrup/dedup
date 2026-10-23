@@ -18,9 +18,12 @@ Cloned files share data blocks with the file they were cloned from, saving space
 on disk. Unlike a hardlinked file, any future modification to either the clone
 or the original file will be remain private to that file (copy-on-write).
 
-**dedup** works in two phases. First it evaluates all of the paths provided
-recursively, looking for duplicates. Once all duplicates are found, any files
-that are not already clones of "best" clone source are replaced with clones.
+**dedup** scans the provided paths recursively. It uses file size, device,
+sampled bytes, and a quick hash to find candidate matches, then compares the
+complete contents byte for byte before replacing a duplicate. Replacements
+happen during traversal, using the first matching source encountered. Within
+each directory, files with more hard links are considered first, with names
+breaking ties.
 
 There are limits which files can be cloned:
 
@@ -28,14 +31,9 @@ There are limits which files can be cloned:
 2. the file must have only one link
 3. the file and its directory must be writable by the user
 
-The "best" source is chosen by first finding the file with the most hard links.
-Files with multiple hard links will not be replaced, so using them as the source
-of other clones allows their blocks to be shared without modifying the data to
-which they point. If all files have a single link, a file which shares the most
-clones with others is chosen. This ensures that files which have been previously
-processed will not need to be replaced during subsequent evaluations of the same
-directory. If none of the files have multiple links or clones, the first file
-encountered will be chosen.
+Existing clones are skipped in clone mode. Existing hard links are preserved;
+files with multiple links may be sources but are not replaced. Hard-link and
+symbolic-link modes also process files that already share clone data.
 
 Files with multiple hard links are not replaced because it is not possible to
 guarantee all other links to that inode exist within the tree(s) being
@@ -65,36 +63,18 @@ permissions, there should be little issue. The created files are also not
 copy-on-write and will share any modifications made. These options should only
 be used if the consequences of each choice are understood.
 
-## FAST MODE
+## MATCHING AND VERIFICATION
 
-**dedup-fast** provides a high-performance alternative to the traditional
-two-phase deduplication approach. Instead of computing full SHA256 hashes for
-all files and then deduplicating in a second pass, **dedup-fast** uses a
-signature-based approach with immediate cloning.
+The `dedup` executable uses lightweight signatures to reduce unnecessary full
+file reads. Each signature contains four sampled values and a quick hash of the
+first 4 KiB. Matching signatures only select candidates: every candidate must
+pass a complete byte comparison before replacement. Signature collisions do not
+authorize replacement.
 
-### Signature-Based Deduplication
-
-**dedup-fast** computes lightweight signatures for each file using:
-
-- **Strategic sampling**: Reads 4-byte samples at 0%, 33%, 66%, and 100% positions
-- **Quick hash**: xxHash64 of the first 4KB (or entire file if smaller)
-- **NEON acceleration**: Uses ARM NEON instructions for vectorized comparisons when available
-
-Files with matching signatures are considered duplicates and cloned immediately
-during the scan phase, eliminating the need for a separate deduplication pass.
-
-### Performance Benefits
-
-- **Single-pass operation**: No separate scan and dedup phases
-- **Reduced I/O**: Avoids full file reads for SHA256 computation
-- **Memory efficient**: Uses hash table instead of complex red-black trees
-- **Immediate cloning**: Duplicates are resolved as soon as they're found
-
-### Limitations
-
-- **Higher false positive rate**: Signature collisions may occur (rare)
-- **No SHA256 verification**: Relies on signature accuracy
-- **Memory usage**: Hash table grows with unique file count
+Worker threads compute signatures concurrently. Candidate matching and
+replacement follow traversal order. Hard links and clones use a temporary file
+in the destination directory before replacement, so a failed creation leaves
+the destination intact.
 
 # OPTIONS
 
@@ -104,7 +84,7 @@ The following options are available:
 
 > Only traverse
 > *depth*
-> directories deep into each provided path.
+> directories deep into each provided path. Accepts integers from 0 to 65535.
 
 **-h**
 
@@ -113,7 +93,7 @@ The following options are available:
 **-n**, **-&#45;dry-run**
 
 > Evaluate all files and find all duplicates but only print what would be done
-> and do not modify any files.
+> and do not replace any files. Add `-v` to list planned replacements.
 
 **-l**, **-&#45;link**
 
@@ -133,7 +113,22 @@ The following options are available:
 > as the number of CPUs on the host as described by the `hw.ncpu` value returned
 > by [`sysctl(8)`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sysctl.3.html).
 > If the value 0 is provided all evaluation will be done serially in the main
-> thread.
+> thread. Accepts integers from 0 to 255.
+
+**-F** *format*, **-&#45;format** *format*
+
+> Select byte-size formatting, such as `raw`, `si`, or `binary`.
+> `--help` lists available formats.
+
+**-S** *file*, **-&#45;summary** *file*
+
+> Write completed replacements to a new summary file. An existing path is
+> rejected to protect input files from accidental truncation. The summary is
+> excluded from scanning. Failure to create or write it returns an error.
+
+**-C**, **-&#45;no-clone-conversion**
+
+> Skip replacements in clone mode. This also applies to dry-run estimates.
 
 **-V**, **-&#45;version**
 
@@ -178,7 +173,7 @@ in the same directory as target file.
 Find all duplicates and display which files would be replaced by clones along
 with the estimated space that would be saved:
 
-	$ dedup -n
+	$ dedup -nv
 
 Limit execution to a single thread, disable progress, and display human readable
 output while deduplicating files in `~/Downloads` and `/tmp`
@@ -270,7 +265,11 @@ were available in macOS 12, so it may work there as well.
 For building the app, a recent version of [Xcode](https://developer.apple.com/xcode/)
 is required along with Command Line Tools (`xcode-select --install`).
 
-[Check](https://libcheck.github.io/check/) is used for testing.
+[Check](https://libcheck.github.io/check/) is used for testing. Python 3 runs the
+CLI regression tests. Run `make check-fast` for the self-contained comparison,
+replacement, formatting, identity, and CLI tests. This target creates disposable
+files and does not mount disk images. The full `make check` target also exercises
+macOS volume and metadata fixtures.
 
 [Aspell](http://aspell.net) is used for spell checking.
 
@@ -377,15 +376,10 @@ appropriate system calls.
 
 ### Linux
 
-Linux is supported with `--symlink` and `--link` modes. Clone mode (`-C`)
-requires a filesystem supporting `FICLONE` (btrfs, xfs with reflink).
-The active clone backend is auto-detected at startup and can be overridden with
-the `DEDUP_BACKEND` environment variable:
-
-- `clonefile` — macOS `clonefile(2)` (default on macOS)
-- `ficlone` — Linux `FICLONE` ioctl (auto-detected on Linux)
-- `ubt` — userspace BTRFS backend (future)
-- `auto` — probe the system and pick the best available
+Linux backend code is experimental. The current executable and integration
+suite still depend on macOS headers and APIs; `make check-linux` is not a
+working portability gate. Linux support requires completing the platform guards,
+filesystem capability detection, and test fixtures.
 
 ### FreeBSD
 

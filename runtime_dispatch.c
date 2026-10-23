@@ -6,6 +6,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +18,8 @@
 #include "signature.h"
 
 static DedupRuntimeDispatch g_runtime_dispatch;
-static bool g_runtime_dispatch_initialized = false;
+static atomic_bool g_runtime_dispatch_initialized = false;
+static pthread_mutex_t g_runtime_dispatch_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t fast_hash_xxhash_backend(const void* data, size_t len) {
     return signature_fast_hash_bytes(data, len);
@@ -32,6 +36,9 @@ static bool read_exact(int fd, void* buf, size_t len, off_t offset) {
     size_t done = 0;
     while (done < len) {
         ssize_t n = pread(fd, (unsigned char*)buf + done, len - done, offset + (off_t)done);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
         if (n <= 0) {
             return false;
         }
@@ -76,18 +83,27 @@ static bool witness_cpu_backend(const char* a_path, const char* b_path, uint64_t
         return true;
     }
 
-    int a_fd = open(a_path, O_RDONLY);
+    int a_fd = open(a_path, O_RDONLY | O_NONBLOCK);
     if (a_fd < 0) {
         return false;
     }
 
-    int b_fd = open(b_path, O_RDONLY);
+    int b_fd = open(b_path, O_RDONLY | O_NONBLOCK);
     if (b_fd < 0) {
         close(a_fd);
         return false;
     }
 
-    bool matches = true;
+    bool matches = false;
+    struct stat a_st = {0};
+    struct stat b_st = {0};
+    if (fstat(a_fd, &a_st) != 0 || fstat(b_fd, &b_st) != 0 ||
+        !S_ISREG(a_st.st_mode) || !S_ISREG(b_st.st_mode) ||
+        a_st.st_size < 0 || b_st.st_size < 0 ||
+        (uint64_t)a_st.st_size != size || (uint64_t)b_st.st_size != size) {
+        goto cleanup;
+    }
+    matches = true;
     size_t window_size = size < 4096U ? (size_t)size : 4096U;
     off_t offsets[3] = {
         0,
@@ -105,7 +121,7 @@ static bool witness_cpu_backend(const char* a_path, const char* b_path, uint64_t
     off_t sample_positions[4] = {
         0,
         (off_t)(size / 3U),
-        (off_t)((size * 2U) / 3U),
+        (off_t)((size / 3U) * 2U + ((size % 3U) * 2U) / 3U),
         (off_t)(size > 4U ? size - 4U : 0),
     };
     for (size_t i = 0; i < 4; i++) {
@@ -163,14 +179,14 @@ static bool env_is_enabled(const char* env_name) {
 
 static size_t parse_size_override(const char* env_name, size_t fallback) {
     const char* raw = getenv(env_name);
-    if (!raw || raw[0] == '\0') {
+    if (!raw || raw[0] < '0' || raw[0] > '9') {
         return fallback;
     }
 
     char* end = NULL;
     errno = 0;
     unsigned long long parsed = strtoull(raw, &end, 10);
-    if (errno != 0 || end == raw || *end != '\0' || parsed == 0) {
+    if (errno != 0 || end == raw || *end != '\0' || parsed == 0 || parsed > SIZE_MAX) {
         return fallback;
     }
 
@@ -205,7 +221,12 @@ static dedup_exact_compare_fn exact_backend_for_name(const char* name) {
 }
 
 const DedupRuntimeDispatch* dedup_runtime_dispatch_get(void) {
-    if (!g_runtime_dispatch_initialized) {
+    if (!atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_acquire)) {
+        pthread_mutex_lock(&g_runtime_dispatch_mutex);
+        if (atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_relaxed)) {
+            pthread_mutex_unlock(&g_runtime_dispatch_mutex);
+            return &g_runtime_dispatch;
+        }
         static const char* const fast_hash_names[] = { "xxhash", "rapidhash", "komihash", "blake3" };
         static const char* const strong_hash_names[] = { "none", "blake3", "sha3", "pmull_poly" };
         static const char* const witness_names[] = { "none", "cpu_witness", "gpu_witness_stream" };
@@ -279,7 +300,8 @@ const DedupRuntimeDispatch* dedup_runtime_dispatch_get(void) {
             g_runtime_dispatch.witness_name = "gpu_witness_stream";
         }
 
-        g_runtime_dispatch_initialized = true;
+        atomic_store_explicit(&g_runtime_dispatch_initialized, true, memory_order_release);
+        pthread_mutex_unlock(&g_runtime_dispatch_mutex);
     }
 
     return &g_runtime_dispatch;
@@ -316,8 +338,11 @@ bool dedup_runtime_exact_compare(const char* a_path, const char* b_path, uint64_
 }
 
 void dedup_runtime_dispatch_reset_for_tests(void) {
+    // Test resets require all users of the returned dispatch to be idle.
+    pthread_mutex_lock(&g_runtime_dispatch_mutex);
     memset(&g_runtime_dispatch, 0, sizeof(g_runtime_dispatch));
-    g_runtime_dispatch_initialized = false;
+    atomic_store_explicit(&g_runtime_dispatch_initialized, false, memory_order_release);
+    pthread_mutex_unlock(&g_runtime_dispatch_mutex);
 }
 
 void dedup_runtime_dispatch_print_verbose(void) {
