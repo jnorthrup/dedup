@@ -1,0 +1,6 @@
+# Keep analysis consistent regardless of the developer's parent configuration.
+InheritParentConfig: false
+Checks: '-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling'
+WarningsAsErrors: '*'
+# macOS does not provide the optional C11 Annex K functions (e.g. fprintf_s)
+# recommended by DeprecatedOrUnsafeBufferHandling. Other analyzer checks stay on.

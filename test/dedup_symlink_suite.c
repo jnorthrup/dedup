@@ -38,7 +38,7 @@
 #include "test_utils.h"
 
 START_TEST(dedup_symlink_empty) {
-    char* output = run("../dedup -s test-data/symlink/empty");
+    char* output = run(DEDUP_COMMAND " -s test-data/symlink/empty");
     ck_assert_str_eq("duplicates found: 0\nentries pruned: 0\nbytes saved: 0 bytes\nalready saved: 0 bytes\n", output);
     free(output);
 
@@ -55,7 +55,7 @@ START_TEST(dedup_symlink_empty) {
 void symlink_check_bars() {
     uint64_t bcid = get_clone_id("test-data/symlink/bars/bar");
 
-    char* output = run("../dedup -s test-data/symlink/bars");
+    char* output = run(DEDUP_COMMAND " -s test-data/symlink/bars");
     free(output);
 
     struct stat b1, b2, b3, b4, b5;
@@ -89,7 +89,7 @@ START_TEST(dedup_symlink_hardlinks) {
 } END_TEST
 
 START_TEST(dedup_symlink_devices) {
-    int r = system("../dedup -s test-data/symlink/devices");
+    int r = system(DEDUP_COMMAND " -s test-data/symlink/devices");
     ck_assert_int_eq(0, r);
 
     struct stat f, e;
@@ -101,7 +101,7 @@ START_TEST(dedup_symlink_devices) {
 } END_TEST
 
 START_TEST(dedup_symlink_big) {
-    int r = system("../dedup -s test-data/symlink/big");
+    int r = system(DEDUP_COMMAND " -s test-data/symlink/big");
     ck_assert_int_eq(0, r);
 
     struct stat f, e;
@@ -113,7 +113,7 @@ START_TEST(dedup_symlink_big) {
 } END_TEST
 
 START_TEST(dedup_symlink_same_size) {
-    int r = system("../dedup -s -t0 test-data/symlink/same-size");
+    int r = system(DEDUP_COMMAND " -s -t0 test-data/symlink/same-size");
     ck_assert_int_eq(0, r);
 
     int cwd = open(".", O_RDONLY | O_DIRECTORY);
@@ -135,7 +135,7 @@ START_TEST(dedup_symlink_same_size) {
 } END_TEST
 
 START_TEST(dedup_symlink_same_first_last) {
-    int r = system("../dedup -s test-data/symlink/same-first-last");
+    int r = system(DEDUP_COMMAND " -s test-data/symlink/same-first-last");
     ck_assert_int_eq(0, r);
 
     ck_assert_uint_ne(get_clone_id("test-data/symlink/same-first-last/same-1"),
@@ -143,7 +143,7 @@ START_TEST(dedup_symlink_same_first_last) {
 } END_TEST
 
 START_TEST(dedup_symlink_flags_acls) {
-    int r = system("../dedup -s test-data/symlink/flags-acls");
+    int r = system(DEDUP_COMMAND " -s test-data/symlink/flags-acls");
     ck_assert_int_eq(0, r);
 
     struct stat b1, b3;
@@ -163,7 +163,7 @@ START_TEST(dedup_symlink_flags_acls) {
 START_TEST(dedup_symlink_hfs) {
 #define HFS_MOUNT_PREFIX "/Volumes/dedup-test-hfs-symlink"
     uint64_t bcid = get_clone_id(HFS_MOUNT_PREFIX "/bar");
-    char* output = run("../dedup -sPhx " HFS_MOUNT_PREFIX " 2>&1");
+    char* output = run(DEDUP_COMMAND " -sPhx " HFS_MOUNT_PREFIX " 2>&1");
     free(output);
 
     // this test should work identically to symlink_check_bars
@@ -195,7 +195,7 @@ START_TEST(dedup_symlink_hfs) {
 } END_TEST
 
 START_TEST(dedup_symlink_dry_run) {
-    int r = system("../dedup -s -nP /Volumes/dedup-test-hfs-symlink test-data/symlink/bars");
+    int r = system(DEDUP_COMMAND " -s -nP /Volumes/dedup-test-hfs-symlink test-data/symlink/bars");
     ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 

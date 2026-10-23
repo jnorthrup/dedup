@@ -37,7 +37,7 @@
 #include "test_utils.h"
 
 START_TEST(dedup_empty) {
-    char* output = run("../dedup test-data/clonefile/empty");
+    char* output = run(DEDUP_COMMAND " test-data/clonefile/empty");
     ck_assert_str_eq("duplicates found: 0\nentries pruned: 0\nbytes saved: 0 bytes\nalready saved: 0 bytes\n", output);
     free(output);
 
@@ -54,7 +54,7 @@ START_TEST(dedup_empty) {
 void check_bars() {
     uint64_t bcid = get_clone_id("test-data/clonefile/bars/bar");
 
-    char* output = run("../dedup test-data/clonefile/bars");
+    char* output = run(DEDUP_COMMAND " test-data/clonefile/bars");
     free(output);
 
     struct stat b1, b2, b3, b4, b5;
@@ -88,7 +88,7 @@ START_TEST(dedup_hardlinks) {
 } END_TEST
 
 START_TEST(dedup_devices) {
-    int r = system("../dedup test-data/clonefile/devices");
+    int r = system(DEDUP_COMMAND " test-data/clonefile/devices");
     ck_assert_int_eq(0, r);
 
     struct stat f, e;
@@ -100,7 +100,7 @@ START_TEST(dedup_devices) {
 } END_TEST
 
 START_TEST(dedup_big) {
-    int r = system("../dedup test-data/clonefile/big");
+    int r = system(DEDUP_COMMAND " test-data/clonefile/big");
     ck_assert_int_eq(0, r);
 
     struct stat f, e;
@@ -112,7 +112,7 @@ START_TEST(dedup_big) {
 } END_TEST
 
 START_TEST(dedup_same_size) {
-    int r = system("../dedup -t0 test-data/clonefile/same-size");
+    int r = system(DEDUP_COMMAND " -t0 test-data/clonefile/same-size");
     ck_assert_int_eq(0, r);
 
     ck_assert_uint_eq(get_clone_id("test-data/clonefile/same-size/big"),
@@ -120,7 +120,7 @@ START_TEST(dedup_same_size) {
 } END_TEST
 
 START_TEST(dedup_same_first_last) {
-    int r = system("../dedup test-data/clonefile/same-first-last");
+    int r = system(DEDUP_COMMAND " test-data/clonefile/same-first-last");
     ck_assert_int_eq(0, r);
 
     ck_assert_uint_ne(get_clone_id("test-data/clonefile/same-first-last/same-1"),
@@ -128,7 +128,7 @@ START_TEST(dedup_same_first_last) {
 } END_TEST
 
 START_TEST(dedup_flags_acls) {
-    int r = system("../dedup test-data/clonefile/flags-acls");
+    int r = system(DEDUP_COMMAND " test-data/clonefile/flags-acls");
     ck_assert_int_eq(0, r);
 
     struct stat b1, b3;
@@ -154,33 +154,33 @@ START_TEST(dedup_flags_acls) {
 } END_TEST
 
 START_TEST(dedup_hfs) {
-    char* output = run("../dedup -Phx /Volumes/dedup-test-hfs-clonefile 2>&1");
+    char* output = run(DEDUP_COMMAND " -Phx /Volumes/dedup-test-hfs-clonefile 2>&1");
     ck_assert_str_eq("dedup: Skipping /Volumes/dedup-test-hfs-clonefile: cloning not supported\nduplicates found: 0\nentries pruned: 0\nbytes saved: 0 bytes\nalready saved: 0 bytes\n", output);
     free(output);
 } END_TEST
 
 START_TEST(dedup_does_not_exist) {
-    int r = system("../dedup '' ''");
+    int r = system(DEDUP_COMMAND " '' ''");
     ck_assert_int_eq(1, WEXITSTATUS(r));
 } END_TEST
 
 START_TEST(dedup_negative_threads) {
-    int r = system("../dedup -t -1 test-data/clonefile/bars");
+    int r = system(DEDUP_COMMAND " -t -1 test-data/clonefile/bars");
     ck_assert_int_eq(1, WEXITSTATUS(r));
 } END_TEST
 
 START_TEST(dedup_help) {
-    int r = system("../dedup --help");
+    int r = system(DEDUP_COMMAND " --help");
     ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 
 START_TEST(dedup_dry_run) {
-    int r = system("../dedup -nP /Volumes/dedup-test-hfs-clonefile test-data/clonefile/bars");
+    int r = system(DEDUP_COMMAND " -nP /Volumes/dedup-test-hfs-clonefile test-data/clonefile/bars");
     ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 
 START_TEST(dedup_permission_denied) {
-    char* output = run("../dedup -nP test-data/clonefile/clone-dst-acls 2>&1");
+    char* output = run(DEDUP_COMMAND " -nP test-data/clonefile/clone-dst-acls 2>&1");
     ck_assert_ptr_nonnull(output);
     ck_assert_ptr_null(strstr(output, "could not getattrlist"));
     free(output);
@@ -202,7 +202,7 @@ START_TEST(dedup_preserve_mtime) {
     struct stat before = { 0 }, after = { 0 };
     stat("test-data/clonefile/mtime", &before);
 
-    int r = system("../dedup -Pm test-data/clonefile/mtime");
+    int r = system(DEDUP_COMMAND " -Pm test-data/clonefile/mtime");
     ck_assert_int_eq(0, WEXITSTATUS(r));
 
     stat("test-data/clonefile/mtime", &after);
@@ -218,7 +218,7 @@ START_TEST(dedup_do_not_preserve_mtime) {
     struct stat before = { 0 }, after = { 0 };
     stat("test-data/clonefile/mtime-not-preserved", &before);
 
-    int r = system("../dedup -P test-data/clonefile/mtime-not-preserved");
+    int r = system(DEDUP_COMMAND " -P test-data/clonefile/mtime-not-preserved");
     ck_assert_int_eq(0, WEXITSTATUS(r));
 
     stat("test-data/clonefile/mtime-not-preserved", &after);
@@ -230,8 +230,7 @@ START_TEST(dedup_do_not_preserve_mtime) {
 START_TEST(dedup_preserve_mtime_relative_cwd) {
     // build an absolute path to the binary before chdir changes cwd
     char dedup_path[PATH_MAX] = { 0 };
-    getcwd(dedup_path, sizeof(dedup_path));
-    strlcat(dedup_path, "/../dedup", sizeof(dedup_path));
+    ck_assert_ptr_nonnull(realpath(DEDUP_TEST_BINARY, dedup_path));
 
     char cwd[PATH_MAX] = { 0 };
     getcwd(cwd, sizeof(cwd));
@@ -241,7 +240,7 @@ START_TEST(dedup_preserve_mtime_relative_cwd) {
     stat(".", &before);
 
     char cmd[PATH_MAX + 8];
-    snprintf(cmd, sizeof(cmd), "%s -Pm .", dedup_path);
+    snprintf(cmd, sizeof(cmd), "\"%s\" -Pm .", dedup_path);
     int r = system(cmd);
 
     stat(".", &after);
@@ -256,7 +255,7 @@ START_TEST(dedup_preserve_mtime_relative_cwd) {
 START_TEST(dedup_parent_mtime_immutable) {
     chflags("test-data/clonefile/mtime-immutable", UF_IMMUTABLE);
 
-    char* output = run("../dedup -P test-data/clonefile/mtime-immutable 2>&1");
+    char* output = run(DEDUP_COMMAND " -P test-data/clonefile/mtime-immutable 2>&1");
 
     // clear the flag before any assertions so cleanup always runs
     chflags("test-data/clonefile/mtime-immutable", 0);

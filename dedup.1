@@ -54,6 +54,10 @@ Replacements happen during traversal, using the first matching source. Within
 each directory, files with more hard links are considered first, with names
 breaking ties.
 .Pp
+Repeated paths and overlapping starting directories are evaluated once per
+file name. Separate hard links and clones still contribute to shared-storage
+totals.
+.Pp
 There are limits which files can be cloned:
 .Bl -enum -offset indent
 .It
@@ -176,7 +180,8 @@ utility exits 0 on success and >0 if an error occurs.
 It is possible that during abnormal termination a temporary clone will be left
 before it is moved to the path it is replacing. In such cases a file with the
 prefix .~. followed by the name of the file that was to be replaced will exist
-in the same directory as target file.
+in the same directory as the target file. When that name would exceed a file
+system limit, the prefix is followed by a short random suffix instead.
 .Pp
 .Xr find 1
 can be used to find these temporary files if necessary.

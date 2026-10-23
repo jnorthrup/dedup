@@ -105,10 +105,64 @@ static void allocation_failures(void) {
     free_seen_set(set);
 }
 
+static void exact_paths(void) {
+    SeenPaths* paths = new_seen_paths(16);
+    REQUIRE(paths != NULL);
+    char path[128];
+    for (unsigned i = 0; i < 5000; i++) {
+        snprintf(path, sizeof(path), "/scan/folder-%u/file", i);
+        REQUIRE(seen_paths_insert(paths, path) == 0);
+    }
+    for (unsigned i = 5000; i-- > 0;) {
+        snprintf(path, sizeof(path), "/scan/folder-%u/file", i);
+        REQUIRE(seen_paths_insert(paths, path) == 1);
+    }
+    // Different directory entries must remain distinct, including hard links.
+    REQUIRE(seen_paths_insert(paths, "/scan/a") == 0);
+    REQUIRE(seen_paths_insert(paths, "/scan/b") == 0);
+    REQUIRE(seen_paths_insert(paths, "/scan/a") == 1);
+    free_seen_paths(paths);
+}
+
+static void path_allocation_failures(void) {
+    REQUIRE(new_seen_paths(SIZE_MAX) == NULL);
+    REQUIRE(seen_paths_insert(NULL, "/scan/a") == -1);
+    free_seen_paths(NULL);
+    fail_calloc = true;
+    REQUIRE(new_seen_paths(16) == NULL);
+    fail_calloc = false;
+
+    SeenPaths* paths = new_seen_paths(16);
+    REQUIRE(paths != NULL);
+    REQUIRE(seen_paths_insert(paths, "/scan/a") == 0);
+    fail_malloc = true;
+    REQUIRE(seen_paths_insert(paths, "/scan/a") == 1);
+    REQUIRE(seen_paths_insert(paths, "/scan/b") == -1);
+    fail_malloc = false;
+    REQUIRE(seen_paths_insert(paths, "/scan/b") == 0);
+
+    // A failed resize retains all entries and can recover on a later insert.
+    fail_calloc = true;
+    char path[128];
+    for (unsigned i = 0; i < 128; i++) {
+        snprintf(path, sizeof(path), "/scan/growth-%u", i);
+        REQUIRE(seen_paths_insert(paths, path) == 0);
+    }
+    fail_calloc = false;
+    REQUIRE(seen_paths_insert(paths, "/scan/after-growth") == 0);
+    for (unsigned i = 0; i < 128; i++) {
+        snprintf(path, sizeof(path), "/scan/growth-%u", i);
+        REQUIRE(seen_paths_insert(paths, path) == 1);
+    }
+    free_seen_paths(paths);
+}
+
 int main(void) {
     exact_pairs();
     collisions_and_growth();
     allocation_failures();
-    puts("seen set: exact pairs, collisions, growth, and allocation failures passed");
+    exact_paths();
+    path_allocation_failures();
+    puts("seen set: exact pairs/paths, collisions, growth, and allocation failures passed");
     return EXIT_SUCCESS;
 }

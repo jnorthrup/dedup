@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches-ignore: [ "master" ]
-  pull_request_target:
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -17,21 +17,14 @@ jobs:
     runs-on: macOS-${{ matrix.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: install MacPorts
+      - name: install dependencies
         shell: bash
         run: |
-          MATRIX_VERSION="${{ matrix.version }}"
-          case "${MATRIX_VERSION}" in
-            26) OS_NAME="Tahoe" ;;
-            15) OS_NAME="Sequoia" ;;
-            14) OS_NAME="Sonoma" ;;
-            *)  OS_NAME="Ventura" ;;
-          esac
-          MACPORTS_VERSION=2.12.5
-          MACPORTS_PKG_NAME="MacPorts-${MACPORTS_VERSION}-${MATRIX_VERSION}-${OS_NAME}.pkg"
-          MACPORTS_URL="https://github.com/macports/macports-base/releases/download/v${MACPORTS_VERSION}/${MACPORTS_PKG_NAME}"
-          wget "${MACPORTS_URL}" --output-document "${MACPORTS_PKG_NAME}"
-          sudo installer -pkg "./${MACPORTS_PKG_NAME}" -target /
-          sudo /opt/local/bin/port install check
+          brew install check xxhash aspell llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "CPPFLAGS=-I$(brew --prefix)/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L$(brew --prefix)/lib" >> "$GITHUB_ENV"
       - name: make check
         run: make check
+      - name: check build isolation
+        run: make check-build-system

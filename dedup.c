@@ -1025,6 +1025,30 @@ static int traversal_order(const FTSENT** a, const FTSENT** b) {
     return strcmp((*a)->fts_name, (*b)->fts_name);
 }
 
+static char* canonical_input_path(const char* path) {
+    char* resolved = realpath(path, NULL);
+#if defined(__APPLE__)
+    // An ACL can deny attribute reads while allowing file contents to be read.
+    // F_GETPATH still resolves the actual name, including its case, without
+    // requiring those attributes. Do not follow a raced-in symlink or block
+    // if the entry changed into a FIFO after traversal.
+    if (!resolved && (errno == EACCES || errno == EPERM)) {
+        int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
+        if (fd < 0) return NULL;
+        char buffer[PATH_MAX];
+        int result = fcntl(fd, F_GETPATH, buffer);
+        int error = errno;
+        close(fd);
+        if (result < 0) {
+            errno = error;
+            return NULL;
+        }
+        resolved = strdup(buffer);
+    }
+#endif
+    return resolved;
+}
+
 int main(int argc, char* argv[]) {
 
     FileEntryHead* queue = new_file_entry_queue();
@@ -1106,8 +1130,7 @@ int main(int argc, char* argv[]) {
     while ((ch = getopt_long(argc, argv, "I:PVc::d:F:fhlmnst:vxCS:?", options, NULL)) != -1) {
         switch (ch) {
             case 'I':
-                fprintf(stderr, "-I is unimplemented\n");
-                break;
+                errx(EXIT_FAILURE, "--ignore (-I) is not implemented; no files were processed");
             case 'P':
                 dc.progress = NULL;
                 break;
@@ -1115,8 +1138,7 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "%s\n", version);
                 return 0;
             case 'c':
-                fprintf(stderr, "-c is unimplemented\n");
-                break;
+                errx(EXIT_FAILURE, "--color (-c) is not implemented; no files were processed");
             case 'd':
                 max_depth = parse_count(optarg, UINT16_MAX, "Depth");
                 break;
@@ -1213,6 +1235,12 @@ int main(int argc, char* argv[]) {
     }
     // LCOV_EXCL_STOP
 
+    SeenPaths* visited_paths = new_seen_paths(4096);
+    if (!visited_paths) {
+        fts_close(traversal);
+        errx(EXIT_FAILURE, "cannot allocate visited path table");
+    }
+
     struct stat summary_stat = {0};
     if (dc.summary_file) {
         if (clone_summary_open(dc.summary_file) != 0 ||
@@ -1220,20 +1248,23 @@ int main(int argc, char* argv[]) {
             warn("cannot create summary %s", dc.summary_file);
             clone_summary_close();
             fts_close(traversal);
+            free_seen_paths(visited_paths);
             return 1;
         }
     }
 
-    pthread_t* threads = calloc(dc.thread_count, sizeof(pthread_t));
-    if (!threads) dc.thread_count = 0;
-    for (int i = 0; i < dc.thread_count; i++) {
-        int r = pthread_create(&threads[i], NULL, dedup_work, &dc);
+    const int requested_threads = dc.thread_count;
+    pthread_t* threads = requested_threads ? calloc(requested_threads, sizeof(pthread_t)) : NULL;
+    int started_threads = 0;
+    while (threads && started_threads < requested_threads) {
+        int r = pthread_create(&threads[started_threads], NULL, dedup_work, &dc);
         if (r) {
-            warnx("Could not create worker: %s; using %d workers", strerror(r), i);
-            dc.thread_count = i;
+            warnx("Could not create worker: %s; using %d workers", strerror(r), started_threads);
             break;
         }
+        started_threads++;
     }
+    dc.thread_count = started_threads;
 
     pthread_t pruner_thread = NULL;
     if (dc.thread_count > 0) {
@@ -1244,7 +1275,8 @@ int main(int argc, char* argv[]) {
             pthread_mutex_lock(&dc.prune_done_mutex);
             dc.prune_done = 1;
             pthread_mutex_unlock(&dc.prune_done_mutex);
-            for (int i = 0; i < dc.thread_count; i++) pthread_join(threads[i], NULL);
+            for (int i = 0; i < started_threads; i++) pthread_join(threads[i], NULL);
+            started_threads = 0;
             dc.thread_count = 0;
             dc.prune_done = 0;
         }
@@ -1342,8 +1374,21 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // at this point we have a regular file
-        // that only has one link
+        // An overlapping root can revisit the same directory entry, even after
+        // replacement changed its inode. Canonical paths avoid counting that
+        // visit as shared storage while keeping distinct hard-link names.
+        char* canonical_path = canonical_input_path(entry->fts_path);
+        if (!canonical_path) {
+            report_error(&dc, entry->fts_path, "cannot resolve input path", errno);
+            continue;
+        }
+        int seen = seen_paths_insert(visited_paths, canonical_path);
+        free(canonical_path);
+        if (seen != 0) {
+            if (seen < 0) report_error(&dc, entry->fts_path, "cannot record input path", ENOMEM);
+            continue;
+        }
+
         pthread_mutex_lock(&dc.metrics_mutex);
         dc.total_bytes += entry->fts_statp->st_size;
         pthread_mutex_unlock(&dc.metrics_mutex);
@@ -1411,6 +1456,7 @@ int main(int argc, char* argv[]) {
     }
 
     fts_close(traversal);
+    free_seen_paths(visited_paths);
 
     // Signal FTS scan complete to pruner
     pthread_mutex_lock(&dc.scan_done_mutex);
@@ -1429,7 +1475,7 @@ int main(int argc, char* argv[]) {
     dc.prune_done = 1;
     pthread_mutex_unlock(&dc.prune_done_mutex);
 
-    for (int i = 0; threads && i < dc.thread_count; i++) {
+    for (int i = 0; i < started_threads; i++) {
         // clang-analyzer thinks threads[i] can be NULL, but `pthread_t`
         // is an opaque type (to us). if `pthread_create` is successful
         // the API contract says we can pass that value to pthread_join.

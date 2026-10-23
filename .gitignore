@@ -2,12 +2,14 @@
 *.swp
 *.gcno
 *.o
+*.d
 *.dSYM
 *.tidy
 .DS_Store
 build/
 compile_commands.json
 dedup
+dedup.arm
 dedup.arm64
 dedup.x86_64
 dedup.universal
@@ -17,3 +19,4 @@ test/output_format_check
 test/seen_set_check
 .cache/
 ubifs/libubt.a
+test/.build-config

@@ -41,4 +41,11 @@ void free_seen_set(SeenSet* set);
 /// allocation failure returns false, so callers never prune an unseen file.
 bool seen_set_insert(SeenSet* set, uint64_t device, uint64_t id);
 
+// Exact canonical paths distinguish repeated visits from separate hard links.
+typedef struct SeenPaths SeenPaths;
+SeenPaths* new_seen_paths(size_t capacity);
+void free_seen_paths(SeenPaths* paths);
+// Returns 1 for a repeated path, 0 for a new path, or -1 on allocation failure.
+int seen_paths_insert(SeenPaths* paths, const char* path);
+
 #endif // __DEDUP_SEEN_SET_H__

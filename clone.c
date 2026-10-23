@@ -28,6 +28,7 @@
 #include <sys/clonefile.h>
 #include <copyfile.h>
 #endif
+#include <sys/random.h>
 #include <sys/stat.h>
 #if defined(__FREEBSD__) || defined(__linux__)
 #include <sys/ioctl.h>
@@ -40,6 +41,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,10 +57,6 @@
 #endif
 
 static int find_zero_file(const char* restrict path) {
-    if (access(path, W_OK)) {
-        return 1;
-    }
-
     struct stat s = { 0 };
     if (stat(path, &s)) {
         fprintf(stderr, "Could not stat %s\n", path);
@@ -92,9 +90,36 @@ char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
         return NULL;
     }
 
+    long name_max = pathconf(dir, _PC_NAME_MAX);
+    if (name_max < 0) name_max = NAME_MAX;
+
+    // Keep recognizable staging names where they fit. A valid destination
+    // can already use NAME_MAX bytes, so use a short random suffix rather
+    // than extending (or truncating) that basename. The caller still creates
+    // this path exclusively; neither a collision nor a failed create gives
+    // us ownership of an existing file.
+    char suffix[33];
+    const char* stage_base = base;
+    if (strlen(base) + 3 > (size_t)name_max ||
+        strlen(dir) + strlen(base) + 5 > size) {
+        unsigned char random[16];
+        static const char hex[] = "0123456789abcdef";
+        if (getentropy(random, sizeof(random)) != 0) return NULL;
+        for (size_t i = 0; i < sizeof(random); i++) {
+            suffix[i * 2] = hex[random[i] >> 4];
+            suffix[i * 2 + 1] = hex[random[i] & 0x0f];
+        }
+        suffix[sizeof(suffix) - 1] = '\0';
+        stage_base = suffix;
+    }
+
+    if (strlen(stage_base) + 3 > (size_t)name_max) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
     if (strlcat(out, dir, size) >= size ||
         strlcat(out, "/.~.", size) >= size ||
-        strlcat(out, base, size) >= size) {
+        strlcat(out, stage_base, size) >= size) {
         errno = ENAMETOOLONG;
         return NULL;
     }

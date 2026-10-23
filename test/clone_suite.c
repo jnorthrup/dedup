@@ -28,8 +28,10 @@
 #include <sys/attr.h>
 
 #include <check.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,10 +72,15 @@ START_TEST(clone_bad_dst) {
 } END_TEST
 
 START_TEST(clone_cannot_replace) {
+    struct stat before, after;
+    ck_assert_int_eq(stat("test-data/clonefile/clone-dst-acls/bar4", &before), 0);
     int r = replace_with_clone("test-data/clonefile/clone-dst-acls/bar",
                                "test-data/clonefile/clone-dst-acls/bar4",
                                PRESERVE_PARENT_MTIME);
-    ck_assert_int_eq(r, 2);
+    ck_assert_int_ne(r, 0);
+    ck_assert_int_eq(stat("test-data/clonefile/clone-dst-acls/bar4", &after), 0);
+    ck_assert_uint_eq(before.st_ino, after.st_ino);
+    ck_assert_uint_eq(before.st_flags, after.st_flags);
 } END_TEST
 
 char* tmp_name(const char* restrict path, char* restrict out, size_t size);
@@ -211,6 +218,81 @@ START_TEST(replacement_preserves_staging_collision) {
     safety_assert_content(safety_dst, "original destination");
 } END_TEST
 
+START_TEST(clone_accepts_readonly_source) {
+    safety_write(safety_src, "source contents");
+    ck_assert_int_eq(chmod(safety_src, 0444), 0);
+
+    const mode_t modes[] = { 0640, 0444 };
+    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+        safety_write(safety_dst, "original destination");
+        ck_assert_int_eq(chmod(safety_dst, modes[i]), 0);
+        ck_assert_int_eq(replace_with_clone(safety_src, safety_dst, false), 0);
+
+        struct stat src, dst;
+        ck_assert_int_eq(stat(safety_src, &src), 0);
+        ck_assert_int_eq(stat(safety_dst, &dst), 0);
+        ck_assert_uint_eq(src.st_mode & 0777, 0444);
+        ck_assert_uint_eq(dst.st_mode & 0777, modes[i]);
+        ck_assert_uint_ne(src.st_ino, dst.st_ino);
+        safety_assert_content(safety_dst, "source contents");
+        ck_assert_int_eq(unlink(safety_dst), 0);
+        ck_assert_int_eq(access(safety_tmp, F_OK), -1);
+    }
+} END_TEST
+
+START_TEST(replacement_accepts_maximum_length_names) {
+    long name_max = pathconf(safety_dir, _PC_NAME_MAX);
+    ck_assert_int_gt(name_max, 3);
+    ck_assert_int_le(name_max, NAME_MAX);
+    safety_write(safety_src, "source contents");
+
+    // A truncated .~.<basename> would collide with this unrelated file.
+    char collision[NAME_MAX + 1];
+    memcpy(collision, ".~.", 3);
+    memset(collision + 3, 'x', (size_t)name_max - 3);
+    collision[name_max] = '\0';
+    snprintf(safety_tmp, sizeof(safety_tmp), "%s/%s", safety_dir, collision);
+    safety_write(safety_tmp, "unrelated staging file");
+
+    for (size_t length = (size_t)name_max - 2; length <= (size_t)name_max; length++) {
+        char base[NAME_MAX + 1];
+        memset(base, 'x', length);
+        base[length] = '\0';
+        snprintf(safety_dst, sizeof(safety_dst), "%s/%s", safety_dir, base);
+        safety_write(safety_dst, "original destination");
+
+        int result;
+        if (_i == 0) {
+            result = replace_with_clone(safety_src, safety_dst, false);
+        } else if (_i == 1) {
+            result = replace_with_link(safety_src, safety_dst);
+        } else {
+            result = replace_with_symlink(safety_src, safety_dst);
+        }
+        ck_assert_int_eq(result, 0);
+        safety_assert_content(safety_dst, "source contents");
+        safety_assert_content(safety_tmp, "unrelated staging file");
+
+        struct stat src, dst;
+        ck_assert_int_eq(stat(safety_src, &src), 0);
+        ck_assert_int_eq(lstat(safety_dst, &dst), 0);
+        if (_i == 0) ck_assert_uint_ne(src.st_ino, dst.st_ino);
+        if (_i == 1) ck_assert_uint_eq(src.st_ino, dst.st_ino);
+        if (_i == 2) ck_assert(S_ISLNK(dst.st_mode));
+
+        DIR* dir = opendir(safety_dir);
+        ck_assert_ptr_nonnull(dir);
+        size_t entries = 0;
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..")) entries++;
+        }
+        ck_assert_int_eq(closedir(dir), 0);
+        ck_assert_uint_eq(entries, 3);
+        ck_assert_int_eq(unlink(safety_dst), 0);
+    }
+} END_TEST
+
 START_TEST(relative_path_can_exceed_path_max) {
     // A short component in an absolute path expands to "../" in a
     // relative path. Both inputs fit PATH_MAX while the result does not.
@@ -261,6 +343,8 @@ Suite* clone_suite() {
     tcase_add_test(safety, link_replacement_is_hardlink);
     tcase_add_test(safety, link_rename_failure_removes_staging_file);
     tcase_add_test(safety, replacement_preserves_staging_collision);
+    tcase_add_test(safety, clone_accepts_readonly_source);
+    tcase_add_loop_test(safety, replacement_accepts_maximum_length_names, 0, 3);
     tcase_add_test(safety, relative_path_can_exceed_path_max);
     suite_add_tcase(s, safety);
 

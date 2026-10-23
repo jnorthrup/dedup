@@ -37,7 +37,7 @@
 #include "test_utils.h"
 
 START_TEST(dedup_link_empty) {
-    char* output = run("../dedup -l test-data/link/empty");
+    char* output = run(DEDUP_COMMAND " -l test-data/link/empty");
     ck_assert_str_eq("duplicates found: 0\nentries pruned: 0\nbytes saved: 0 bytes\nalready saved: 0 bytes\n", output);
     free(output);
 
@@ -54,7 +54,7 @@ START_TEST(dedup_link_empty) {
 void link_check_bars() {
     uint64_t bcid = get_clone_id("test-data/link/bars/bar");
 
-    char* output = run("../dedup -l test-data/link/bars");
+    char* output = run(DEDUP_COMMAND " -l test-data/link/bars");
     free(output);
 
     struct stat b1, b2, b3, b4, b5;
@@ -88,7 +88,7 @@ START_TEST(dedup_link_hardlinks) {
 } END_TEST
 
 START_TEST(dedup_link_devices) {
-    int r = system("../dedup -l test-data/link/devices");
+    int r = system(DEDUP_COMMAND " -l test-data/link/devices");
     ck_assert_int_eq(0, r);
 
     struct stat f, e;
@@ -100,7 +100,7 @@ START_TEST(dedup_link_devices) {
 } END_TEST
 
 START_TEST(dedup_link_big) {
-    int r = system("../dedup -l test-data/link/big");
+    int r = system(DEDUP_COMMAND " -l test-data/link/big");
     ck_assert_int_eq(0, r);
 
     struct stat f, e;
@@ -112,7 +112,7 @@ START_TEST(dedup_link_big) {
 } END_TEST
 
 START_TEST(dedup_link_same_size) {
-    int r = system("../dedup -l -t0 test-data/link/same-size");
+    int r = system(DEDUP_COMMAND " -l -t0 test-data/link/same-size");
     ck_assert_int_eq(0, r);
 
     ck_assert_uint_eq(get_clone_id("test-data/link/same-size/big"),
@@ -120,7 +120,7 @@ START_TEST(dedup_link_same_size) {
 } END_TEST
 
 START_TEST(dedup_link_same_first_last) {
-    int r = system("../dedup -l test-data/link/same-first-last");
+    int r = system(DEDUP_COMMAND " -l test-data/link/same-first-last");
     ck_assert_int_eq(0, r);
 
     ck_assert_uint_ne(get_clone_id("test-data/link/same-first-last/same-1"),
@@ -132,7 +132,7 @@ START_TEST(dedup_link_flags_acls) {
     stat("test-data/link/flags-acls/bar3", &b3);
     ck_assert_int_eq(0642 | S_IFREG, b3.st_mode);
 
-    int r = system("../dedup -l test-data/link/flags-acls");
+    int r = system(DEDUP_COMMAND " -l test-data/link/flags-acls");
     ck_assert_int_eq(0, r);
 
     stat("test-data/link/flags-acls/bar", &b1);
@@ -151,7 +151,7 @@ START_TEST(dedup_link_flags_acls) {
 START_TEST(dedup_link_hfs) {
 #define HFS_MOUNT_PREFIX "/Volumes/dedup-test-hfs-link"
     uint64_t bcid = get_clone_id(HFS_MOUNT_PREFIX "/bar");
-    char* output = run("../dedup -l -Phx " HFS_MOUNT_PREFIX " 2>&1");
+    char* output = run(DEDUP_COMMAND " -l -Phx " HFS_MOUNT_PREFIX " 2>&1");
     free(output);
 
     // this test should work identically to link_check_bars
@@ -181,12 +181,12 @@ START_TEST(dedup_link_hfs) {
 } END_TEST
 
 START_TEST(dedup_link_does_not_exist) {
-    int r = system("../dedup -l '' ''");
+    int r = system(DEDUP_COMMAND " -l '' ''");
     ck_assert_int_eq(1, WEXITSTATUS(r));
 } END_TEST
 
 START_TEST(dedup_link_dry_run) {
-    int r = system("../dedup -l -nP /Volumes/dedup-test-hfs-link test-data/link/bars");
+    int r = system(DEDUP_COMMAND " -l -nP /Volumes/dedup-test-hfs-link test-data/link/bars");
     ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 

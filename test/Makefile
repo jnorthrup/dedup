@@ -1,4 +1,6 @@
-CFLAGS += \
+.DEFAULT_GOAL := check
+
+COMMON_CFLAGS = \
     -I/opt/homebrew/include \
 	-std=c2x \
     -Wall -Wextra -Werror -pedantic \
@@ -23,17 +25,34 @@ CFLAGS += \
     -fPIE \
     -Og
 
-LDFLAGS += \
-    -L/opt/homebrew/lib
+TEST_CFLAGS = $(COMMON_CFLAGS) $(CFLAGS)
+TEST_LDFLAGS = -L/opt/homebrew/lib $(LDFLAGS)
+DEDUP_TEST_BINARY ?= $(abspath ../dedup)
+shquote = '$(subst ','"'"',$(1))'
+TEST_CPPFLAGS = $(CPPFLAGS) $(call shquote,-DDEDUP_TEST_BINARY="$(DEDUP_TEST_BINARY)")
+SUPPORT_OBJECTS = runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o
+SUITE_OBJECTS = dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o test_utils.o
+TEST_OBJECTS = $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) output_format_test.o output_format_support.o seen_set_test.o
+
+# Invalidate test objects when their compiler flags or selected CLI change.
+.build-config: FORCE
+	@printf '%s\n' $(call shquote,CC=$(CC)) $(call shquote,CPPFLAGS=$(TEST_CPPFLAGS)) \
+	    $(call shquote,CFLAGS=$(TEST_CFLAGS)) $(call shquote,LDFLAGS=$(TEST_LDFLAGS)) \
+	    $(call shquote,LDLIBS=$(LDLIBS)) > $@.tmp
+	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
+
+FORCE:
+
+-include $(TEST_OBJECTS:.o=.d)
 
 .PHONY: \
-	check check-fast check-linux \
+	check check-fast check-linux FORCE \
     setup setup-all setup-clonefile setup-symlink setup-link \
     clean clean-test-data clean-clonefile clean-symlink clean-link
 
-%.o: %.c %.h
-	rm -f $(basename $<).gcda $(basename $<).gcno
-	$(CC) $(CFLAGS) -c -o $@ $<
+%.o: %.c .build-config
+	rm -f $(@:.o=.gcda)
+	$(CC) $(TEST_CPPFLAGS) $(TEST_CFLAGS) -MMD -MP -c -o $@ $<
 
 check: dedup_check setup-all
 	./dedup_check
@@ -47,13 +66,17 @@ check-fast: dedup_check output_format_check seen_set_check
 	CK_RUN_SUITE=runtime_dispatch ./dedup_check
 	./output_format_check
 	./seen_set_check
-	python3 cli_test.py
+	python3 cli_test.py --binary "$(DEDUP_TEST_BINARY)"
 
-output_format_check: output_format_test.c ../output_format.c ../output_format.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ output_format_test.c ../output_format.c
+output_format_check: output_format_test.o output_format_support.o .build-config
+	$(CC) $(TEST_CFLAGS) $(TEST_LDFLAGS) -o $@ output_format_test.o output_format_support.o $(LDLIBS)
 
-seen_set_check: seen_set_test.c ../seen_set.c ../seen_set.h
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ seen_set_test.c
+output_format_support.o: ../output_format.c .build-config
+	rm -f $(@:.o=.gcda)
+	$(CC) $(TEST_CPPFLAGS) $(TEST_CFLAGS) -MMD -MP -c -o $@ $<
+
+seen_set_check: seen_set_test.o .build-config
+	$(CC) $(TEST_CFLAGS) $(TEST_LDFLAGS) -o $@ seen_set_test.o $(LDLIBS)
 
 # Linux CI target: uses tmpfs/scratch dirs, no mount privileges needed.
 # Clone/HFS suites skipped unless running as root with btrfs loop device.
@@ -92,41 +115,12 @@ setup-linux:
 	cat test-data-linux/same-first-last/big2 >> test-data-linux/same-first-last/same-2
 	echo "z" >> test-data-linux/same-first-last/same-2
 
-dedup_check: dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o
-	rm -f dedup_check.gcda dedup_check.gcno
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ -l check $^
+dedup_check: $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) .build-config
+	$(CC) $(TEST_CFLAGS) $(TEST_LDFLAGS) -o $@ $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) -lcheck $(LDLIBS)
 
-alist_test.o: ../alist.c ../alist.h
-	rm -f alist_test.gcda alist_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../alist.c
-
-clone_test.o: ../clone.c ../clone.h
-	rm -f clone_test.gcda clone_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../clone.c
-
-map_test.o: ../map.c ../map.h
-	rm -f map_test.gcda map_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../map.c
-
-utils_test.o: ../utils.c ../utils.h
-	rm -f utils_test.gcda utils_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../utils.c
-
-signature_test.o: ../signature.c ../signature.h
-	rm -f signature_test.gcda signature_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../signature.c
-
-sig_table_test.o: ../sig_table.c ../sig_table.h
-	rm -f sig_table_test.gcda sig_table_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../sig_table.c
-
-runtime_caps_test.o: ../runtime_caps.c ../runtime_caps.h
-	rm -f runtime_caps_test.gcda runtime_caps_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../runtime_caps.c
-
-runtime_dispatch_test.o: ../runtime_dispatch.c ../runtime_dispatch.h ../runtime_caps.h ../signature.h
-	rm -f runtime_dispatch_test.gcda runtime_dispatch_test.gcno
-	$(CC) $(CFLAGS) -c -o $@ ../runtime_dispatch.c
+$(SUPPORT_OBJECTS): %_test.o: ../%.c .build-config
+	rm -f $(@:.o=.gcda)
+	$(CC) $(TEST_CPPFLAGS) $(TEST_CFLAGS) -MMD -MP -c -o $@ $<
 
 # clean-test-data: NAMESPACE ?= .
 clean-test-data:
@@ -294,7 +288,7 @@ clean-all-test-data:
 	if [ -d test-data ]; then rmdir test-data; fi
 
 clean: clean-all-test-data
-	rm -f *.o
+	rm -f *.o *.d .build-config
 	rm -rf *.dSYM/
 	rm -f dedup_check output_format_check seen_set_check
 	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o

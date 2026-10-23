@@ -86,7 +86,7 @@ static inline size_t hash_key(uint64_t device, uint64_t id, size_t mask) {
 }
 
 static bool seen_set_grow(SeenSet* set) {
-    if (set->capacity > SIZE_MAX / 2 / sizeof(Slot)) return false;
+    if (set->capacity == 0 || set->capacity > SIZE_MAX / 2 / sizeof(Slot)) return false;
     size_t new_cap = set->capacity * 2;
     Slot* new_slots = calloc(new_cap, sizeof(Slot));
     if (!new_slots) return false;
@@ -138,4 +138,93 @@ bool seen_set_insert(SeenSet* set, uint64_t device, uint64_t id) {
     set->slots[idx].state = OCCUPIED;
     set->count++;
     return false; // newly inserted
+}
+
+typedef struct PathEntry {
+    char* path;
+    uint64_t hash;
+    struct PathEntry* next;
+} PathEntry;
+
+struct SeenPaths {
+    PathEntry** buckets;
+    size_t capacity;
+    size_t count;
+};
+
+SeenPaths* new_seen_paths(size_t capacity) {
+    if (capacity < 16) capacity = 16;
+    if (capacity > SIZE_MAX / sizeof(PathEntry*)) return NULL;
+    SeenPaths* paths = calloc(1, sizeof(*paths));
+    if (!paths) return NULL;
+    paths->buckets = calloc(capacity, sizeof(*paths->buckets));
+    if (!paths->buckets) {
+        free(paths);
+        return NULL;
+    }
+    paths->capacity = capacity;
+    return paths;
+}
+
+void free_seen_paths(SeenPaths* paths) {
+    if (!paths) return;
+    for (size_t i = 0; i < paths->capacity; i++) {
+        PathEntry* entry = paths->buckets[i];
+        while (entry) {
+            PathEntry* next = entry->next;
+            free(entry->path);
+            free(entry);
+            entry = next;
+        }
+    }
+    free(paths->buckets);
+    free(paths);
+}
+
+static void grow_seen_paths(SeenPaths* paths) {
+    if (paths->capacity == 0 || paths->capacity > SIZE_MAX / 2 / sizeof(PathEntry*)) return;
+    size_t capacity = paths->capacity * 2;
+    PathEntry** buckets = calloc(capacity, sizeof(*buckets));
+    // Chaining remains correct if resizing fails.
+    if (!buckets) return;
+    for (size_t i = 0; i < paths->capacity; i++) {
+        PathEntry* entry = paths->buckets[i];
+        while (entry) {
+            PathEntry* next = entry->next;
+            size_t bucket = entry->hash % capacity;
+            entry->next = buckets[bucket];
+            buckets[bucket] = entry;
+            entry = next;
+        }
+    }
+    free(paths->buckets);
+    paths->buckets = buckets;
+    paths->capacity = capacity;
+}
+
+int seen_paths_insert(SeenPaths* paths, const char* path) {
+    if (!paths || !path) return -1;
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (const unsigned char* p = (const unsigned char*)path; *p; p++) {
+        hash = (hash ^ *p) * UINT64_C(1099511628211);
+    }
+    size_t bucket = hash % paths->capacity;
+    for (PathEntry* entry = paths->buckets[bucket]; entry; entry = entry->next) {
+        if (entry->hash == hash && strcmp(entry->path, path) == 0) return 1;
+    }
+    PathEntry* entry = malloc(sizeof(*entry));
+    if (!entry) return -1;
+    size_t length = strlen(path) + 1;
+    entry->path = malloc(length);
+    if (!entry->path) {
+        free(entry);
+        return -1;
+    }
+    memcpy(entry->path, path, length);
+    entry->hash = hash;
+    entry->next = paths->buckets[bucket];
+    paths->buckets[bucket] = entry;
+    paths->count++;
+    if (paths->count >= paths->capacity) grow_seen_paths(paths);
+    return 0;
 }

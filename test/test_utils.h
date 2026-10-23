@@ -27,6 +27,11 @@
 #ifndef __DEDUP_TEST_UTILS__
 #define __DEDUP_TEST_UTILS__
 
+#ifndef DEDUP_TEST_BINARY
+#define DEDUP_TEST_BINARY "../dedup"
+#endif
+#define DEDUP_COMMAND "\"" DEDUP_TEST_BINARY "\""
+
 /// run a command and return its stdout
 ///
 /// - Parameters:

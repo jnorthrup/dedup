@@ -25,6 +25,10 @@ happen during traversal, using the first matching source encountered. Within
 each directory, files with more hard links are considered first, with names
 breaking ties.
 
+Repeated paths and overlapping starting directories are evaluated once per
+file name. Separate hard links and clones still contribute to shared-storage
+totals.
+
 There are limits which files can be cloned:
 
 1. the file must be a regular file
@@ -162,7 +166,8 @@ The **dedup** utility exits 0 on success and &gt;0 if an error occurs.
 It is possible that during abnormal termination a temporary clone will be left
 before it is moved to the path it is replacing. In such cases a file with the
 prefix `.~.` followed by the name of the file that was to be replaced will exist
-in the same directory as target file.
+in the same directory as the target file. When that name would exceed a file
+system limit, the prefix is followed by a short random suffix instead.
 
 `find(1)` can be used to find these temporary files if necessary.
 
@@ -270,6 +275,11 @@ CLI regression tests. Run `make check-fast` for the self-contained comparison,
 replacement, formatting, identity, and CLI tests. This target creates disposable
 files and does not mount disk images. The full `make check` target also exercises
 macOS volume and metadata fixtures.
+
+Release, sanitizer, and leak-check builds use separate directories under `build`.
+Both test targets use `build/check/dedup`; `make` produces the release executable
+at `./dedup`. Run `make check-build-system` to verify build isolation, compiler
+flag changes, and header dependencies in a disposable source copy.
 
 [Aspell](http://aspell.net) is used for spell checking.
 

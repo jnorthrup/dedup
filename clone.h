@@ -33,8 +33,8 @@
 /// replaced with a clone of `src`. Unlike `clonefile(2)`, it is expected
 /// that `dst` already exists. All metadata (mode, flags, & ACLs)
 /// are retained on `dst`. The current user must have read access to both
-/// `src` and `dst` and write access to `dst` and the directory where
-/// `dst` resides.
+/// `src` and `dst`, permission to copy the destination's metadata, and write
+/// access to the directory where `dst` resides. The source may be read-only.
 ///
 /// `src` and `dst` must be on the same volume. (TODO: is it enough
 /// that they are with in the same APFS partition, can clones span
@@ -45,7 +45,7 @@
 ///
 /// On failure clonefile will return one of the following values:
 ///
-///   [ENOMEM]     the name of the temporary file is longer than `PATH_MAX`
+///   [ENAMETOOLONG] the temporary path cannot fit in `PATH_MAX`
 ///
 ///   In addition, `replace_with_clone` may return any error
 ///   returned by `clonefile(2)`, `copyfile(2)`, or `rename(2)`.
