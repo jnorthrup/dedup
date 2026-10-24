@@ -115,16 +115,11 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     sig->device = device;
     sig->size = size;
 
-    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    // Open file directly in standard blocking mode, saving 2 fcntl syscalls per file
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
         free(sig);
         return NULL;
-    }
-
-    // Clear O_NONBLOCK for actual I/O operations
-    int flags = fcntl(fd, F_GETFL);
-    if (flags >= 0) {
-        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
     if (size == 0) {
@@ -166,16 +161,11 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     }
 
     size_t hash_size = size < 4096 ? (size_t)size : 4096U;
-    char* buf = malloc(hash_size);
-    if (!buf) {
-        close(fd);
-        free(sig);
-        return NULL;
-    }
+    // Stack allocation avoids dynamic malloc/free overhead for 4KB quick hash reads
+    char buf[4096];
 
     ssize_t n = pread(fd, buf, hash_size, 0);
     if (n < 0 || (size_t)n != hash_size) {
-        free(buf);
         close(fd);
         free(sig);
         return NULL;
@@ -188,7 +178,6 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     }
     sig->quick_hash = hash_fn(buf, (size_t)n);
 
-    free(buf);
     close(fd);
 
     return sig;
