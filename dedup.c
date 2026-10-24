@@ -46,8 +46,10 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include <sys/mount.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
 #include <sys/attr.h>
 #include <sys/sysctl.h>
+#endif
 #include <sys/ioctl.h>
 
 #include <assert.h>
@@ -838,15 +840,16 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
 }
 
 __attribute__((noreturn))
-static void usage(char* pgm, DedupContext* ctx) {
-    fprintf(stderr,
+static void usage(char* pgm, DedupContext* ctx, int exit_code, FILE* out) {
+    if (!out) out = stderr;
+    fprintf(out,
             "%s\nusage: %s [-I pattern] [-t n] [-PVcnvx] [-d n] [file ...]\n\n"
                 "Options:\n"
                 // "  --ignore, -I pattern     Exclude a pattern from being used as a clone\n"
                 // "                           source or being replaced by a clone. This option\n"
                 // "                           can be specified multiple times.\n"
                 "  --dry-run, -n            Don't replace file content, just print what \n"
-                "                           would have happend.\n"
+                "                           would have happened.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
                 "  --format, -F format      Output format for byte sizes. See --help formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
@@ -869,7 +872,7 @@ static void usage(char* pgm, DedupContext* ctx) {
             pgm,
             ctx->thread_count);
 
-    exit(1);
+    exit(exit_code);
 }
 
 __attribute__((const))
@@ -1038,7 +1041,7 @@ int main(int argc, char* argv[]) {
                 if (d < 0) {
                     fprintf(stderr, "Depth must be a positive value: %s\n",
                             optarg);
-                    usage(argv[0], &dc);
+                    usage(argv[0], &dc, 1, stderr);
                 }
                 max_depth = d;
                 break;
@@ -1063,7 +1066,7 @@ int main(int argc, char* argv[]) {
                     fprintf(stderr,
                             "Thread count must be a positive value: %s\n",
                             optarg);
-                    usage(argv[0], &dc);
+                    usage(argv[0], &dc, 1, stderr);
                 }
                 dc.thread_count = t;
                 break;
@@ -1080,8 +1083,17 @@ int main(int argc, char* argv[]) {
                 dc.summary_file = strdup(optarg);
                 break;
             case '?':
+                if (optind <= argc && optind > 0 &&
+                    (strcmp(argv[optind - 1], "--help") == 0 || strcmp(argv[optind - 1], "-?") == 0)) {
+                    if (optind < argc && strcmp(argv[optind], "formats") == 0) {
+                        list_available_formats(stdout);
+                        exit(0);
+                    }
+                    usage(argv[0], &dc, 0, stdout);
+                }
+                usage(argv[0], &dc, 1, stderr);
             default:
-                usage(argv[0], &dc);
+                usage(argv[0], &dc, 1, stderr);
         }
     }
     argc -= optind;
