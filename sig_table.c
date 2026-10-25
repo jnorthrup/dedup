@@ -8,11 +8,31 @@
 
 #include "runtime_dispatch.h"
 
+#include <stdint.h>
+
+static size_t next_power_of_2(size_t v) {
+    if (v < 16) return 16;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+#if SIZE_MAX > 0xFFFFFFFFU
+    v |= v >> 32;
+#endif
+    v++;
+    return v;
+}
+
 SigTable* new_sig_table(size_t bucket_count) {
     SigTable* table = calloc(1, sizeof(SigTable));
     if (!table) {
         return NULL;
     }
+
+    // Ensure bucket_count is a power of 2 for fast bitwise mask indexing
+    bucket_count = next_power_of_2(bucket_count);
 
     table->buckets = calloc(bucket_count, sizeof(SigTableEntry*));
     if (!table->buckets) {
@@ -52,7 +72,10 @@ SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char*
     }
 
     uint64_t hash = hash_signature(sig);
-    size_t bucket_idx = hash % table->bucket_count;
+    // Performance optimization: bucket_count is guaranteed to be a power of 2 by new_sig_table().
+    // Using bitwise AND (hash & mask) instead of integer modulo (hash % bucket_count)
+    // eliminates expensive 64-bit hardware division (~25-40 CPU cycles down to 1 CPU cycle).
+    size_t bucket_idx = hash & (table->bucket_count - 1);
 
     // Check for existing match in collision chain.
     // SMHasher-style discipline: a fast hash/signature only nominates candidates;

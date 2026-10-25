@@ -69,7 +69,9 @@ FileEntry* file_entry_next(FileEntryHead* queue) {
      }
 
      FileEntry* e = STAILQ_FIRST(queue);
-     STAILQ_REMOVE(queue, e, FileEntry, entries);
+     // Performance optimization: STAILQ_REMOVE_HEAD directly dequeues the head element in O(1)
+     // without the unnecessary conditional branch and lookup in STAILQ_REMOVE.
+     STAILQ_REMOVE_HEAD(queue, entries);
 
      return e;
 }

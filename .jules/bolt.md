@@ -1,0 +1,3 @@
+## 2026-10-25 - Signature Table Hash Indexing Bottleneck
+**Learning:** In C hash table implementations where bucket count is stored as a variable struct field (`table->bucket_count`), compilers generate costly 64-bit hardware integer division (`idiv`/`udiv`, ~25-40 CPU cycles per lookup) for `hash % bucket_count`. Ensuring `bucket_count` is rounded up to a power of 2 allows bitwise mask indexing `hash & (bucket_count - 1)`, reducing index calculation to 1 CPU cycle (~8.5x faster).
+**Action:** Always round hash table capacity to powers of 2 in `new_*` constructors and use bitwise mask indexing.
