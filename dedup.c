@@ -1043,6 +1043,10 @@ int main(int argc, char* argv[]) {
                 max_depth = d;
                 break;
             case 'F':
+                if (strcmp(optarg, "help") == 0 || strcmp(optarg, "list") == 0 || strcmp(optarg, "?") == 0) {
+                    list_available_formats(stdout);
+                    exit(0);
+                }
                 dc.output_format = parse_output_format(optarg);
                 break;
             case 'h':
