@@ -245,14 +245,27 @@ int replace_with_clone(const char* src, const char* dst) {
 
 
 int replace_with_link(const char* src, const char* dst) {
-    // TODO: should this atomically move a tmp file instead of
-    //       two step an unlink and link?
-    if (unlink(dst)) {
-        warn("%s", dst);
-        return 1;
+    // Stage: create a temporary hardlink first, then atomic rename swap.
+    // This prevents data loss if link(2) fails (e.g. EXDEV across filesystems).
+    char tmp[PATH_MAX];
+    if (!tmp_name(dst, tmp, PATH_MAX)) {
+        return errno;
     }
 
-    return link(src, dst);
+    int r = link(src, tmp);
+    if (r) {
+        int e = errno;
+        return e;
+    }
+
+    r = rename(tmp, dst);
+    if (r) {
+        int e = errno;
+        unlink(tmp);
+        return e;
+    }
+
+    return 0;
 }
 
 // returns a relative path to dst from src
