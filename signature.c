@@ -166,16 +166,12 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     }
 
     size_t hash_size = size < 4096 ? (size_t)size : 4096U;
-    char* buf = malloc(hash_size);
-    if (!buf) {
-        close(fd);
-        free(sig);
-        return NULL;
-    }
+    // Performance optimization: use a fixed 4KB stack buffer to avoid malloc/free overhead
+    // and heap lock contention per file signature computation.
+    char buf[4096];
 
     ssize_t n = pread(fd, buf, hash_size, 0);
     if (n < 0 || (size_t)n != hash_size) {
-        free(buf);
         close(fd);
         free(sig);
         return NULL;
@@ -188,7 +184,6 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     }
     sig->quick_hash = hash_fn(buf, (size_t)n);
 
-    free(buf);
     close(fd);
 
     return sig;
