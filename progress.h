@@ -38,11 +38,11 @@ typedef struct Progress {
 
 /// Disables further progress output until `enable_progress` is called. This is
 /// useful for scenarios where a global event has occurred (like a signal being
-/// caught.
-void disable_progress();
-void enable_progress();
+/// caught).
+void disable_progress(void);
+void enable_progress(void);
 
 void display_progress(const Progress* progress);
-void clear_progress();
+void clear_progress(void);
 
 #endif // __DEDUP_PROGRESS_H__
