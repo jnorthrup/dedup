@@ -245,14 +245,28 @@ int replace_with_clone(const char* src, const char* dst) {
 
 
 int replace_with_link(const char* src, const char* dst) {
-    // TODO: should this atomically move a tmp file instead of
-    //       two step an unlink and link?
-    if (unlink(dst)) {
-        warn("%s", dst);
-        return 1;
+    // Security: Use a temporary link and atomic rename to prevent data loss.
+    // Unlinking dst before link(src, dst) creates a TOCTOU race window where
+    // dst is missing, and risks permanent data loss if link() fails (e.g., EMLINK).
+    char tmp[PATH_MAX];
+    if (!tmp_name(dst, tmp, PATH_MAX)) {
+        return errno;
     }
 
-    return link(src, dst);
+    if (link(src, tmp)) {
+        int e = errno;
+        warn("%s", tmp);
+        return e;
+    }
+
+    if (rename(tmp, dst)) {
+        int e = errno;
+        unlink(tmp);
+        warn("%s", dst);
+        return e;
+    }
+
+    return 0;
 }
 
 // returns a relative path to dst from src
