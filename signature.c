@@ -165,17 +165,12 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
         }
     }
 
+    // Use stack buffer for initial 4KB sample hash to eliminate heap allocation/deallocation overhead per file
     size_t hash_size = size < 4096 ? (size_t)size : 4096U;
-    char* buf = malloc(hash_size);
-    if (!buf) {
-        close(fd);
-        free(sig);
-        return NULL;
-    }
+    char buf[4096];
 
     ssize_t n = pread(fd, buf, hash_size, 0);
     if (n < 0 || (size_t)n != hash_size) {
-        free(buf);
         close(fd);
         free(sig);
         return NULL;
@@ -188,7 +183,6 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     }
     sig->quick_hash = hash_fn(buf, (size_t)n);
 
-    free(buf);
     close(fd);
 
     return sig;
@@ -214,7 +208,11 @@ bool signatures_match(const FileSignature* a, const FileSignature* b) {
     uint32x2_t tmp = vand_u32(vget_low_u32(cmp), vget_high_u32(cmp));
     return vget_lane_u32(vpmin_u32(tmp, tmp), 0) == 0xFFFFFFFF;
 #else
-    return memcmp(a->samples, b->samples, sizeof(a->samples)) == 0;
+    // Direct integer comparisons avoid memcmp overhead on non-ARM platforms
+    return (a->samples[0] == b->samples[0]) &&
+           (a->samples[1] == b->samples[1]) &&
+           (a->samples[2] == b->samples[2]) &&
+           (a->samples[3] == b->samples[3]);
 #endif
 }
 
