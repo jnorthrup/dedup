@@ -4,7 +4,7 @@ CFLAGS += \
     -Wall -Wextra -Werror -pedantic \
     -Wpointer-arith \
     -Wno-unused-parameter \
-    -Wp,-D_FORTIFY_SOURCE=2 \
+    -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 \
     -fexceptions \
     -fpic \
     -fprofile-arcs \

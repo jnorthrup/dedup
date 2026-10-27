@@ -16,7 +16,7 @@ CFLAGS += \
     -Wno-unused-parameter \
     -Wno-gnu-conditional-omitted-operand \
     -Wno-macro-redefined \
-    -Wp,-D_FORTIFY_SOURCE=3 \
+    -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
     -fexceptions \
     -fpic \
     -fPIE \
