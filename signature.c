@@ -115,16 +115,10 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     sig->device = device;
     sig->size = size;
 
-    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
         free(sig);
         return NULL;
-    }
-
-    // Clear O_NONBLOCK for actual I/O operations
-    int flags = fcntl(fd, F_GETFL);
-    if (flags >= 0) {
-        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
     if (size == 0) {

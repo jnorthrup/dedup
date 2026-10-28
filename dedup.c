@@ -46,8 +46,12 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include <sys/mount.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
 #include <sys/attr.h>
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/sysctl.h>
+#endif
 #include <sys/ioctl.h>
 
 #include <assert.h>
@@ -601,20 +605,11 @@ void* prune_work(void* ctx) {
         // Survivor: pass to work queue
         // queued_count stays the same (file moves between queues)
         pthread_mutex_lock(&c->queue_mutex);
-        file_entry_queue_append(c->queue,
-                                fe->path,
-                                fe->device,
-                                fe->inode,
-                                fe->nlink,
-                                fe->flags,
-                                fe->size,
-                                fe->sequence,
-                                fe->level);
+        file_entry_queue_push(c->queue, fe);
         pthread_mutex_unlock(&c->queue_mutex);
         
         // Show pruner progress (survivor passes through)
         display_status(c, fe->path);
-        file_entry_free(fe);
     }
 
     free_seen_set(seen_inodes);
@@ -1296,16 +1291,7 @@ int main(int argc, char* argv[]) {
                 file_entry_free(fe);
             } else {
                 // Survivor goes to work_queue (already counted in queued_count)
-                file_entry_queue_append(queue,
-                                        fe->path,
-                                        fe->device,
-                                        fe->inode,
-                                        fe->nlink,
-                                        fe->flags,
-                                        fe->size,
-                                        fe->sequence,
-                                        fe->level);
-                file_entry_free(fe);
+                file_entry_queue_push(queue, fe);
                 dedup_work(&dc);
             }
         } else {

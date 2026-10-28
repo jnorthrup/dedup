@@ -63,6 +63,12 @@ void file_entry_queue_append(FileEntryHead* queue,
     STAILQ_INSERT_TAIL(queue, e, entries);
 }
 
+void file_entry_queue_push(FileEntryHead* queue, FileEntry* fe) {
+    if (queue && fe) {
+        STAILQ_INSERT_TAIL(queue, fe, entries);
+    }
+}
+
 FileEntry* file_entry_next(FileEntryHead* queue) {
      if (STAILQ_EMPTY(queue)) {
          return NULL;

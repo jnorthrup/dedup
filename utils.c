@@ -24,7 +24,10 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#if defined(__APPLE__)
 #include <sys/attr.h>
+#endif
+#include <sys/stat.h>
 
 #include <err.h>
 #include <stdio.h>
@@ -36,6 +39,7 @@
 #define ATTR_BITMAP_COUNT 5
 
 uint64_t get_clone_id(const char* restrict path) {
+#if defined(__APPLE__)
     struct attrlist attrList = {
         .bitmapcount = ATTR_BITMAP_COUNT,
         .forkattr = ATTR_CMNEXT_CLONEID,
@@ -53,9 +57,14 @@ uint64_t get_clone_id(const char* restrict path) {
     }
 
     return clone_id.value;
+#else
+    (void)path;
+    return 0;
+#endif
 }
 
 int may_share_blocks(const char* restrict path) {
+#if defined(__APPLE__)
     struct attrlist attrList = {
         .bitmapcount = ATTR_BITMAP_COUNT,
         .forkattr = ATTR_CMNEXT_EXT_FLAGS,
@@ -73,9 +82,14 @@ int may_share_blocks(const char* restrict path) {
     }
 
     return clone_id.value | EF_MAY_SHARE_BLOCKS;
+#else
+    (void)path;
+    return 0;
+#endif
 }
 
 size_t private_size(const char* restrict path) {
+#if defined(__APPLE__)
     struct attrlist attrList = {
         .bitmapcount = ATTR_BITMAP_COUNT,
         .forkattr = ATTR_CMNEXT_PRIVATESIZE,
@@ -93,6 +107,10 @@ size_t private_size(const char* restrict path) {
     }
 
     return size_attr.size;
+#else
+    (void)path;
+    return 0;
+#endif
 }
 
 ino_t get_inode(const char* restrict path) {

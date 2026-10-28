@@ -27,9 +27,14 @@
 #ifndef __DEDUP_MAP_H__
 #define __DEDUP_MAP_H__
 
+#if defined(__APPLE__)
 #include <sys/rbtree.h>
+#elif defined(__has_include) && __has_include(<bsd/sys/tree.h>)
+#include <bsd/sys/tree.h>
+#endif
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "alist.h"
 #include "attr.h"
