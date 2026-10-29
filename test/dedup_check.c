@@ -33,6 +33,7 @@ Suite* dedup_link_suite();
 Suite* dedup_symlink_suite();
 Suite* signature_suite();
 Suite* runtime_dispatch_suite();
+Suite* seen_set_suite();
 
 int main() {
     SRunner* sr = srunner_create(NULL);
@@ -42,6 +43,7 @@ int main() {
     srunner_add_suite(sr, dedup_symlink_suite());
     srunner_add_suite(sr, signature_suite());
     srunner_add_suite(sr, runtime_dispatch_suite());
+    srunner_add_suite(sr, seen_set_suite());
 
     srunner_set_fork_status(sr, CK_NOFORK);
     srunner_run_all(sr, CK_VERBOSE);

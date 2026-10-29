@@ -78,9 +78,13 @@ setup-linux:
 	cat test-data-linux/same-first-last/big2 >> test-data-linux/same-first-last/same-2
 	echo "z" >> test-data-linux/same-first-last/same-2
 
-dedup_check: dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o
+dedup_check: dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o seen_set_suite.o test_utils.o runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o seen_set_test.o
 	rm -f dedup_check.gcda dedup_check.gcno
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ -l check $^
+
+seen_set_test.o: ../seen_set.c ../seen_set.h
+	rm -f seen_set_test.gcda seen_set_test.gcno
+	$(CC) $(CFLAGS) -c -o $@ ../seen_set.c
 
 alist_test.o: ../alist.c ../alist.h
 	rm -f alist_test.gcda alist_test.gcno
@@ -259,4 +263,4 @@ clean: clean-all-test-data
 	rm -f *.o
 	rm -rf *.dSYM/
 	rm -f dedup_check
-	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o
+	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o seen_set_test.o

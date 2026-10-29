@@ -29,18 +29,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define EMPTY    0
-#define OCCUPIED 1
+// Performance / Memory Optimization:
+// Storing only `uint64_t key` reduces Slot size from 16 bytes (key + uint8_t state + 7 padding bytes)
+// down to 8 bytes.
+// Empty slots are represented by 0. Key 0 is tracked separately via `has_zero` flag on `SeenSet`
+// to eliminate any key collision risk while maintaining 100% precision for all 64-bit integer keys.
+// This reduces table memory footprint by 50% and doubles CPU cache line density (8 slots per 64-byte line).
+#define EMPTY_SENTINEL 0ULL
 
 typedef struct {
     uint64_t key;
-    uint8_t  state;
 } Slot;
 
 struct SeenSet {
     Slot*  slots;
     size_t capacity; // always a power of 2
     size_t count;
+    bool   has_zero; // handles key 0 without remapping/collisions
 };
 
 static size_t next_power_of_2(size_t v) {
@@ -70,6 +75,7 @@ SeenSet* new_seen_set(size_t capacity) {
 
     set->capacity = capacity;
     set->count = 0;
+    set->has_zero = false;
     return set;
 }
 
@@ -91,14 +97,13 @@ static bool seen_set_grow(SeenSet* set) {
 
     size_t mask = new_cap - 1;
     for (size_t i = 0; i < set->capacity; i++) {
-        if (set->slots[i].state != OCCUPIED) continue;
         uint64_t key = set->slots[i].key;
+        if (key == EMPTY_SENTINEL) continue;
         size_t idx = hash_key(key, mask);
-        while (new_slots[idx].state == OCCUPIED) {
+        while (new_slots[idx].key != EMPTY_SENTINEL) {
             idx = (idx + 1) & mask;
         }
         new_slots[idx].key = key;
-        new_slots[idx].state = OCCUPIED;
     }
 
     free(set->slots);
@@ -108,6 +113,15 @@ static bool seen_set_grow(SeenSet* set) {
 }
 
 bool seen_set_insert(SeenSet* set, uint64_t key) {
+    // Key 0 is handled cleanly using `has_zero` flag without sentinel remapping
+    if (key == 0) {
+        if (set->has_zero) {
+            return true;
+        }
+        set->has_zero = true;
+        return false;
+    }
+
     // Grow at 75% load
     if (set->count * 4 >= set->capacity * 3) {
         seen_set_grow(set);
@@ -116,7 +130,7 @@ bool seen_set_insert(SeenSet* set, uint64_t key) {
     size_t mask = set->capacity - 1;
     size_t idx = hash_key(key, mask);
 
-    while (set->slots[idx].state == OCCUPIED) {
+    while (set->slots[idx].key != EMPTY_SENTINEL) {
         if (set->slots[idx].key == key) {
             return true; // already present
         }
@@ -124,7 +138,6 @@ bool seen_set_insert(SeenSet* set, uint64_t key) {
     }
 
     set->slots[idx].key = key;
-    set->slots[idx].state = OCCUPIED;
     set->count++;
     return false; // newly inserted
 }
