@@ -171,7 +171,7 @@ typedef struct DedupContext {
 
 static int get_terminal_width(void) {
     struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
+    if (ioctl(STDERR_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) {
         return w.ws_col;
     }
     return 80; // fallback
@@ -206,7 +206,7 @@ static void format_count(size_t count, char buf[5]) {
 }
 
 static void display_status(DedupContext* ctx, const char* path) {
-    if (!isatty(STDOUT_FILENO)) {
+    if (!isatty(STDERR_FILENO)) {
         return;
     }
     
@@ -846,7 +846,7 @@ static void usage(char* pgm, DedupContext* ctx) {
                 // "                           source or being replaced by a clone. This option\n"
                 // "                           can be specified multiple times.\n"
                 "  --dry-run, -n            Don't replace file content, just print what \n"
-                "                           would have happend.\n"
+                "                           would have happened.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
                 "  --format, -F format      Output format for byte sizes. See --help formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
@@ -1087,7 +1087,7 @@ int main(int argc, char* argv[]) {
     argc -= optind;
     argv += optind;
 
-    if (!isatty(STDOUT_FILENO)) {
+    if (!isatty(STDERR_FILENO)) {
         dc.progress = NULL;
     }
     
@@ -1391,7 +1391,7 @@ int main(int argc, char* argv[]) {
     putchar('\n');
 
     // Clear status line
-    if (isatty(STDOUT_FILENO)) {
+    if (isatty(STDERR_FILENO)) {
         fprintf(stderr, "\r\033[K\n");
     }
     
