@@ -115,16 +115,10 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     sig->device = device;
     sig->size = size;
 
-    int fd = open(path, O_RDONLY | O_NONBLOCK);
+    int fd = open(path, O_RDONLY);
     if (fd < 0) {
         free(sig);
         return NULL;
-    }
-
-    // Clear O_NONBLOCK for actual I/O operations
-    int flags = fcntl(fd, F_GETFL);
-    if (flags >= 0) {
-        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
 
     if (size == 0) {
@@ -133,39 +127,8 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
         return sig;
     }
 
-    // Sample at 4 strategic positions
-    off_t positions[4] = {
-        0,                               // Start
-        (off_t)(size / 3),               // 1/3 point
-        (off_t)((size * 2) / 3),         // 2/3 point
-        (off_t)(size > 4 ? size - 4 : 0) // End (or start if file < 4 bytes)
-    };
-
-#ifdef __ARM_NEON
-    if (size >= 16) {
-        char buf[16] __attribute__((aligned(16)));
-        for (int i = 0; i < 4; i++) {
-            if (pread(fd, &buf[i * 4], 4, positions[i]) != 4) {
-                close(fd);
-                free(sig);
-                return NULL;
-            }
-        }
-        int32x4_t samples_vec = vld1q_s32((int32_t*)buf);
-        vst1q_s32(sig->samples, samples_vec);
-    } else
-#endif
-    {
-        for (int i = 0; i < 4; i++) {
-            if (!read_sample_into(fd, positions[i], size, &sig->samples[i])) {
-                close(fd);
-                free(sig);
-                return NULL;
-            }
-        }
-    }
-
-    size_t hash_size = size < 4096 ? (size_t)size : 4096U;
+    // Read initial 4KB header (or entire file if smaller) first.
+    size_t hash_size = size < 4096U ? (size_t)size : 4096U;
     char* buf = malloc(hash_size);
     if (!buf) {
         close(fd);
@@ -187,6 +150,41 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
         hash_fn = dispatch->fast_hash;
     }
     sig->quick_hash = hash_fn(buf, (size_t)n);
+
+    // Sample at 4 strategic positions:
+    // 0: Start
+    // 1: 1/3 point
+    // 2: 2/3 point
+    // 3: End (or start if file < 4 bytes)
+    off_t positions[4] = {
+        0,                               // Start
+        (off_t)(size / 3),               // 1/3 point
+        (off_t)((size * 2) / 3),         // 2/3 point
+        (off_t)(size > 4 ? size - 4 : 0) // End (or start if file < 4 bytes)
+    };
+
+    // Extract sample bytes: prefer in-memory buf if position falls within the
+    // 4KB prefix already read, avoiding up to 4 redundant pread syscalls per file.
+    for (int i = 0; i < 4; i++) {
+        off_t pos = positions[i];
+        if (pos >= 0 && (size_t)(pos + 4) <= (size_t)n) {
+            memcpy(&sig->samples[i], buf + pos, 4);
+        } else if (pos >= 0 && (uint64_t)pos < size && (size_t)n == (size_t)size) {
+            // File size < 4 bytes: copy remaining bytes from buf, rest padded with 0
+            unsigned char raw[sizeof(int32_t)] = {0};
+            size_t remaining = (size_t)(size - (uint64_t)pos);
+            size_t to_copy = remaining < sizeof(raw) ? remaining : sizeof(raw);
+            memcpy(raw, buf + pos, to_copy);
+            memcpy(&sig->samples[i], raw, sizeof(raw));
+        } else {
+            if (!read_sample_into(fd, pos, size, &sig->samples[i])) {
+                free(buf);
+                close(fd);
+                free(sig);
+                return NULL;
+            }
+        }
+    }
 
     free(buf);
     close(fd);

@@ -1,0 +1,3 @@
+## 2026-10-30 - In-Memory Sample Extraction & Syscall Elimination in Signature Computation
+**Learning:** `compute_signature` was issuing 2 `fcntl` syscalls (clearing `O_NONBLOCK`) and up to 4 `pread` syscalls for samples *before* reading the 4KB file header. For files <= 4KB, reading the 4KB header first allows extracting all 4 sample values directly from memory, reducing system calls from 7 to 1 per file.
+**Action:** When computing multi-point samples and file header hashes, always read the header buffer first and fulfill overlapping sample offsets directly from memory before falling back to `pread`.
