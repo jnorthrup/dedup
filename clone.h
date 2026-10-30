@@ -76,4 +76,56 @@ int replace_with_link(const char* src, const char* dst);
 /// See also: `symlink(2)`
 int replace_with_symlink(const char* src, const char* dst);
 
+#include "backend.h"
+
+#if defined(DEDUP_IN_PLACE)
+#include <stdint.h>
+
+/// How the storage of a duplicate relates to its origin.
+typedef enum ShareState {
+    SHARE_SEPARATE, ///< the duplicate has blocks of its own
+    SHARE_SHARED,   ///< every block of the duplicate is shared with the origin
+    SHARE_INLINE,   ///< the origin's data is stored inline with metadata
+                    ///< (btrfs small files), which cannot be shared
+    SHARE_UNKNOWN,  ///< the extent maps could not be read or trusted
+} ShareState;
+
+/// share_state
+///
+/// Compares the FIEMAP extent maps of two files of `size` bytes, after
+/// flushing their dirty data so that every extent has its final address.
+ShareState share_state(const char* origin, const char* duplicate, uint64_t size);
+
+typedef enum DedupeResult {
+    DEDUPE_DONE,    ///< the kernel deduplicated every byte
+    DEDUPE_DIFFERS, ///< the files no longer match; nothing was changed
+    DEDUPE_FAILED,  ///< errno says why; nothing was changed
+} DedupeResult;
+
+/// dedupe_in_place
+///
+/// Shares the blocks of `origin` with the identical file `duplicate` using
+/// FIDEDUPERANGE. The kernel compares both files under lock before sharing
+/// anything, so a file that changed since it was compared is left alone.
+/// `duplicate` keeps its inode, and with it its ownership, permissions,
+/// timestamps, extended attributes and hard links. It is opened read-only:
+/// the kernel lets its owner, or anyone allowed to write it, deduplicate.
+///
+/// A successful call does not prove that blocks are shared (btrfs reports
+/// success for inline data, which stays unshared); check with `share_state`.
+DedupeResult dedupe_in_place(const char* origin, const char* duplicate, uint64_t size);
+
+/// dedupe_supported
+///
+/// Asks whether the filesystem holding the regular file at `path`
+/// implements FIDEDUPERANGE, with a zero-length request that changes
+/// nothing. Returns 1 if it does, 0 if it does not, and -1 with errno set
+/// when this file cannot tell (for example, it cannot be opened).
+///
+/// The request stops in the VFS, before the filesystem's own checks: XFS
+/// formatted without reflink answers 1 here and refuses the real request
+/// with EOPNOTSUPP, and other filesystems may do the same.
+int dedupe_supported(const char* path);
+#endif // DEDUP_IN_PLACE
+
 #endif // __DEDUP_CLONE_H__

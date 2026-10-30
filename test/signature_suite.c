@@ -158,7 +158,7 @@ START_TEST(signature_table_rejects_zero_buckets) {
     ck_assert_ptr_null(new_sig_table(0));
     SigTable invalid = {0};
     FileSignature sig = {0};
-    ck_assert_ptr_null(sig_table_insert(&invalid, &sig, "unused", 0));
+    ck_assert_ptr_null(sig_table_insert(&invalid, &sig, "unused", 0, NULL));
 } END_TEST
 
 START_TEST(signature_table_verifies_colliding_candidates) {
@@ -179,7 +179,7 @@ START_TEST(signature_table_verifies_colliding_candidates) {
         ck_assert_ptr_nonnull(sig);
         sig->size = 5;
         const char* path = i == 0 ? a : (i == 1 ? b : c);
-        SigTableEntry* match = sig_table_insert(table, sig, path, 0);
+        SigTableEntry* match = sig_table_insert(table, sig, path, 0, NULL);
         if (i < 2) {
             ck_assert_ptr_null(match);
             ck_assert_uint_eq(sig_table_size(table), i + 1);
@@ -191,7 +191,7 @@ START_TEST(signature_table_verifies_colliding_candidates) {
         }
     }
     ck_assert_uint_eq(sig_table_collisions(table), 1);
-    free_sig_table(table);
+    free_sig_table(table, NULL);
     ck_assert_int_eq(0, unlink(a));
     ck_assert_int_eq(0, unlink(b));
     ck_assert_int_eq(0, unlink(c));
@@ -207,7 +207,9 @@ START_TEST(dedup_detects_small_duplicate_files) {
     write_bytes(a, "A", 1);
     write_bytes(b, "A", 1);
 
-    snprintf(cmd, sizeof(cmd), DEDUP_COMMAND " -nP %s", dir);
+    // a dry run in link mode: detection is the same in every mode, and
+    // clone mode would depend on whether /tmp can share blocks
+    snprintf(cmd, sizeof(cmd), DEDUP_COMMAND " -nlP %s", dir);
     char* output = run(cmd);
     ck_assert_ptr_nonnull(strstr(output, "duplicates found: 1\n"));
     ck_assert_ptr_nonnull(strstr(output, "bytes saved: 1 bytes\n"));
@@ -241,7 +243,9 @@ START_TEST(dedup_rejects_sample_only_signature_collisions) {
     free(file_a);
     free(file_b);
 
-    snprintf(cmd, sizeof(cmd), DEDUP_COMMAND " -nP %s", dir);
+    // a dry run in link mode: detection is the same in every mode, and
+    // clone mode would depend on whether /tmp can share blocks
+    snprintf(cmd, sizeof(cmd), DEDUP_COMMAND " -nlP %s", dir);
     char* output = run(cmd);
     ck_assert_ptr_nonnull(strstr(output, "duplicates found: 0\n"));
     ck_assert_ptr_nonnull(strstr(output, "bytes saved: 0 bytes\n"));

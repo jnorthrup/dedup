@@ -63,13 +63,22 @@ void file_entry_queue_append(FileEntryHead* queue,
     STAILQ_INSERT_TAIL(queue, e, entries);
 }
 
+void file_entry_queue_push(FileEntryHead* queue, FileEntry* fe) {
+    if (queue && fe) {
+        STAILQ_INSERT_TAIL(queue, fe, entries);
+    }
+}
+
 FileEntry* file_entry_next(FileEntryHead* queue) {
      if (STAILQ_EMPTY(queue)) {
          return NULL;
      }
 
      FileEntry* e = STAILQ_FIRST(queue);
-     STAILQ_REMOVE(queue, e, FileEntry, entries);
+     // Use STAILQ_REMOVE_HEAD for O(1) popping of the head element.
+     // STAILQ_REMOVE compares and scans the queue, whereas STAILQ_REMOVE_HEAD
+     // directly updates the head/tail pointers.
+     STAILQ_REMOVE_HEAD(queue, entries);
 
      return e;
 }

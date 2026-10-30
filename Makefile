@@ -7,7 +7,7 @@
 
 LANG = en
 
-VERSION ?= 0.0.6
+VERSION ?= 0.0.7
 
 .DEFAULT_GOAL := all
 
@@ -19,20 +19,20 @@ COMMON_CFLAGS = \
     -Wno-gnu-conditional-omitted-operand \
     -Wno-macro-redefined \
     -Wimplicit-fallthrough \
-    -Wp,-D_FORTIFY_SOURCE=3 \
+    -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
     -fexceptions \
     -fpic \
     -fPIE \
     --param=ssp-buffer-size=4  \
-    -m64 \
     -ftrapv \
     -pipe \
     -fstack-protector \
     -fno-omit-frame-pointer \
     -mtune=generic \
     -O \
+    -I/opt/homebrew/Cellar/xxhash/0.8.3/include \
     '-DVERSION="$(VERSION)"' \
-    '-DBUILD_DATE="$(shell date '+%Y%m%d')"'
+    '-DBUILD_DATE="$(shell date '+%Y%m%d')"' 
 
 ifdef USE_LIBDISPATCH
 FEATURE_CPPFLAGS += -DUSE_LIBDISPATCH
@@ -49,7 +49,7 @@ OBJECT_NAMES = \
     alist.o \
     backend.o \
     clone.o \
-    map.o \
+    extent_map.o \
     progress.o \
     queue.o \
     seen_set.o \
@@ -82,7 +82,7 @@ BUILD_CONFIG = $(BUILD_DIR)/.build-config
 shquote = '$(subst ','"'"',$(1))'
 
 .PHONY: \
-    all install uninstall clean check dist distcheck \
+    all install uninstall clean check dist distcheck dedup-fast \
     build-binary FORCE check-build check-test check-fast check-linux check-build-system \
     check-spelling check-spelling-man check-spelling-readme \
     leaks-build \
@@ -107,6 +107,17 @@ endif
 
 FORCE:
 
+UNAME_S := $(shell uname -s)
+
+ifneq ($(UNAME_S),Darwin)
+# Linux and other non-Apple systems: worker threads need pthreads, and there is
+# no codesign(1) or Apple-only map.c (NetBSD rbtree(3) and CommonCrypto).
+COMMON_CFLAGS += -pthread
+LDLIBS += -pthread
+else
+OBJECT_NAMES += map.o
+endif
+
 $(BUILD_CONFIG): FORCE
 	@mkdir -p $(dir $@)
 	@printf '%s\n' $(call shquote,CC=$(CC)) $(call shquote,AR=$(AR)) \
@@ -122,12 +133,23 @@ $(BUILD_DIR)/%.o: %.c $(BUILD_CONFIG)
 
 $(BUILD_BINARY): $(OBJECTS) $(UBT_LIB) $(BUILD_CONFIG) $(if $(MODE_ENTITLEMENTS_$(BUILD_MODE)),entitlement.plist)
 	$(CC) $(BUILD_CFLAGS) $(BUILD_LDFLAGS) -o $@ $(OBJECTS) $(UBT_LIB) -lxxhash $(LDLIBS)
+ifeq ($(UNAME_S),Darwin)
 	codesign -s - -v -f $(BUILD_ENTITLEMENTS) $@
+endif
 
 build-binary: $(BUILD_BINARY)
 
 dedup: $(BUILD_BINARY) FORCE
 	@cmp -s $< $@ || cp $< $@
+
+# Opt-in experimental tool from feature/hashing-sampling (ARM NEON only). It
+# clones on a signature match without a byte comparison, so it is not part of
+# `all`, `install` or `check`.
+FAST_OBJECT_NAMES = dedup_fast.o map.o alist.o clone.o extent_map.o progress.o queue.o utils.o signature.o sig_table.o output_format.o runtime_caps.o runtime_dispatch.o backend.o
+FAST_OBJECTS = $(addprefix $(BUILD_DIR)/,$(FAST_OBJECT_NAMES))
+dedup-fast: $(FAST_OBJECTS) $(BUILD_CONFIG)
+	$(CC) $(BUILD_CFLAGS) $(BUILD_LDFLAGS) -o $@ $(FAST_OBJECTS) -lxxhash $(LDLIBS)
+	codesign -s - -v -f $(BUILD_ENTITLEMENTS) $@
 
 dedup.arm: FORCE
 	$(MAKE) BUILD_MODE=arm64 build-binary
@@ -166,8 +188,8 @@ check-fast: check-build
 check-build-system:
 	python3 test/build_test.py
 
-check-linux:
-	$(MAKE) -C test check-linux
+check-linux: dedup
+	$(MAKE) -C test check-linux $(call shquote,DEDUP_TEST_BINARY=$(abspath dedup))
 
 -include $(OBJECTS:.o=.d) $(UBT_OBJECTS:.o=.d)
 
@@ -182,6 +204,7 @@ clean: clean-coverage
 	rm -f *.tidy
 	rm -f dedup dedup.arm dedup.x86_64 dedup.universal
 	cd ubifs && $(MAKE) clean
+	rm -f dedup-fast
 	cd test && make clean
 	rm -rf build
 

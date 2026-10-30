@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #include <sys/queue.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 STAILQ_HEAD(FileEntryHead, FileEntry);
 
@@ -60,6 +61,7 @@ void file_entry_queue_append(FileEntryHead* queue,
                              size_t size,
                              uint64_t sequence,
                              short level);
+void file_entry_queue_push(FileEntryHead* queue, FileEntry* fe);
 FileEntry* file_entry_next(FileEntryHead* queue);
 void file_entry_free(FileEntry* fe);
 

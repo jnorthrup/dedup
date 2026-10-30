@@ -11,12 +11,17 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #endif
 
 static DedupRuntimeCaps g_runtime_caps;
+// Worker threads ask for the capabilities on their first file, concurrently.
+// The flag is read with acquire semantics so a reader never sees a partially
+// filled structure; the mutex makes exactly one thread populate it.
 static atomic_bool g_runtime_caps_initialized = false;
 static pthread_mutex_t g_runtime_caps_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_memcmp_bench_sink = 0;

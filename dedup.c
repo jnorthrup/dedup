@@ -44,11 +44,15 @@ static char sccsid[] = "@(#)dedup.c)";
 #endif // 0
 #endif // lint
 
-#include <sys/mount.h>
 #include <sys/stat.h>
-#include <sys/attr.h>
-#include <sys/sysctl.h>
 #include <sys/ioctl.h>
+#if defined(__APPLE__)
+#include <sys/mount.h>
+#include <sys/attr.h>
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/sysctl.h>
+#endif
 
 #include <assert.h>
 #include <stdlib.h>
@@ -67,7 +71,9 @@ static char sccsid[] = "@(#)dedup.c)";
 
 #include "clone.h"
 #include "backend.h"
+#if defined(__APPLE__)
 #include "map.h"
+#endif
 #include "progress.h"
 #include "queue.h"
 #include "output_format.h"
@@ -77,6 +83,26 @@ static char sccsid[] = "@(#)dedup.c)";
 #include "signature.h"
 #include "sig_table.h"
 #include "utils.h"
+
+#if !defined(__BLOCKS__)
+// Without the Blocks extension (clang on Linux), a __block variable is an
+// ordinary local: the non-libdispatch lock macros run their code inline.
+#define __block
+#endif
+
+#if !defined(__APPLE__)
+// BSD file flags from st_flags. FileEntry.flags is always 0 elsewhere; on
+// Linux an immutable file fails the access(W_OK) check instead.
+#ifndef UF_IMMUTABLE
+#define UF_IMMUTABLE 0
+#endif
+#ifndef SF_IMMUTABLE
+#define SF_IMMUTABLE 0
+#endif
+#ifndef UF_COMPRESSED
+#define UF_COMPRESSED 0
+#endif
+#endif
 
 #ifdef USE_LIBDISPATCH
 
@@ -190,6 +216,9 @@ typedef struct DedupContext {
     size_t already_saved;
     size_t pruned;
     size_t errors;
+    size_t skipped;        // Duplicates left in place (hard-linked, unwritable, ...)
+    size_t skipped_bytes;
+    size_t failed;         // Duplicates that could not be replaced
     size_t total_bytes;  // Accumulated bytes of all scanned files
     size_t queued_count; // Entries in raw_queue + work_queue combined
     uint64_t next_file_sequence;
@@ -230,6 +259,104 @@ static void report_error(DedupContext* ctx, const char* path,
     ctx->errors++;
     pthread_mutex_unlock(&ctx->metrics_mutex);
 }
+
+static const char* replacement_name(ReplaceMode mode) {
+    switch (mode) {
+    case DEDUP_LINK:    return "a hard link";
+    case DEDUP_SYMLINK: return "a symbolic link";
+    case DEDUP_CLONE:   break;
+    }
+    return "a clone";
+}
+
+// A duplicate that is left in place. Its bytes are still stored twice, so it
+// is counted as skipped, never as space already saved.
+static void skip_duplicate(DedupContext* ctx, const FileEntry* fe, const char* reason) {
+    if (ctx->verbosity) {
+        OUTPUT_LOCK(ctx, {
+            printf("skipping %s, %s\n", fe->path, reason);
+        });
+    }
+    pthread_mutex_lock(&ctx->metrics_mutex);
+    ctx->skipped++;
+    ctx->skipped_bytes += fe->size;
+    pthread_mutex_unlock(&ctx->metrics_mutex);
+}
+
+// A replacement that failed. The replace_* functions print the system error;
+// this names the file left alone and fails the run's exit status.
+static void fail_duplicate(DedupContext* ctx, const FileEntry* fe, const char* origin) {
+    OUTPUT_LOCK(ctx, {
+        warnx("could not replace %s with %s of %s",
+              fe->path, replacement_name(ctx->replace_mode), origin);
+    });
+    pthread_mutex_lock(&ctx->metrics_mutex);
+    ctx->failed++;
+    ctx->errors++;
+    pthread_mutex_unlock(&ctx->metrics_mutex);
+}
+
+// Whether clone mode keeps the duplicate's inode (see DEDUP_IN_PLACE).
+static bool dedupes_in_place(const DedupContext* ctx) {
+#if defined(DEDUP_IN_PLACE)
+    return ctx->replace_mode == DEDUP_CLONE;
+#else
+    (void)ctx;
+    return false;
+#endif
+}
+
+#if defined(DEDUP_IN_PLACE)
+// Shares the origin's blocks with the duplicate in place and accounts for the
+// outcome. Only blocks seen to be shared afterwards count as saved.
+static void dedupe_duplicate_in_place(DedupContext* ctx, const FileEntry* fe, const char* origin) {
+    DedupeResult result = dedupe_in_place(origin, fe->path, fe->size);
+    if (result == DEDUPE_DIFFERS) {
+        skip_duplicate(ctx, fe, "changed since it was compared");
+        return;
+    }
+
+    if (result == DEDUPE_FAILED) {
+        int error = errno;
+        OUTPUT_LOCK(ctx, {
+            errno = error;
+            warn("could not deduplicate %s with %s", fe->path, origin);
+        });
+        pthread_mutex_lock(&ctx->metrics_mutex);
+        ctx->failed++;
+        ctx->errors++;
+        pthread_mutex_unlock(&ctx->metrics_mutex);
+        return;
+    }
+
+    if (share_state(origin, fe->path, fe->size) != SHARE_SHARED) {
+        OUTPUT_LOCK(ctx, {
+            warnx("%s was deduplicated, but does not share blocks with %s",
+                  fe->path, origin);
+        });
+        pthread_mutex_lock(&ctx->metrics_mutex);
+        ctx->failed++;
+        ctx->errors++;
+        pthread_mutex_unlock(&ctx->metrics_mutex);
+        return;
+    }
+
+    if (ctx->verbosity) {
+        OUTPUT_LOCK(ctx, {
+            printf("deduplicated %s\n", fe->path);
+        });
+    }
+
+    pthread_mutex_lock(&ctx->metrics_mutex);
+    ctx->saved += fe->size;
+    ctx->found++;
+    pthread_mutex_unlock(&ctx->metrics_mutex);
+
+    if (ctx->summary_file) {
+        clone_summary_write(origin, fe->path, fe->size);
+    }
+}
+#endif // DEDUP_IN_PLACE
 
 static int get_terminal_width(void) {
     struct winsize w;
@@ -430,7 +557,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
     pthread_mutex_lock(&ctx->signatures_mutex);
     size_t table_size_before = sig_table_size(ctx->signatures);
-    SigTableEntry* existing = sig_table_insert(ctx->signatures, sig, fe->path, get_clone_id(fe->path));
+    SigTableEntry* existing = sig_table_insert(ctx->signatures, sig, fe->path, get_clone_id(fe->path), NULL);
     size_t table_size_after = sig_table_size(ctx->signatures);
     pthread_mutex_unlock(&ctx->signatures_mutex);
 
@@ -449,11 +576,31 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         display_status(ctx, fe->path);
 
         // Check if already deduplicated
+#if !defined(DEDUP_IN_PLACE)
         uint64_t current_clone_id = get_clone_id(fe->path);
+#endif
         bool same_inode = fe->inode == get_inode(existing->path);
-        if ((ctx->replace_mode == DEDUP_CLONE && current_clone_id != 0 &&
-             current_clone_id == existing->clone_id) ||
-            same_inode) {
+        bool shared_storage = false;
+        if (ctx->replace_mode == DEDUP_CLONE) {
+#if defined(DEDUP_IN_PLACE)
+            ShareState state = share_state(existing->path, fe->path, fe->size);
+            if (!same_inode && (state == SHARE_INLINE || state == SHARE_UNKNOWN)) {
+                skip_duplicate(ctx, fe, state == SHARE_INLINE
+                                        ? "data stored inline, cannot be shared"
+                                        : "could not read its extent map");
+                free_signature(sig);
+                visit_order_end(ctx);
+                return;
+            }
+            shared_storage = (state == SHARE_SHARED);
+#else
+            // A clone id of 0 means it could not be read (or the platform
+            // has none), which proves nothing.
+            shared_storage = current_clone_id != 0 &&
+                             current_clone_id == existing->clone_id;
+#endif
+        }
+        if (shared_storage || same_inode) {
             pthread_mutex_lock(&ctx->metrics_mutex);
             // Repeating a single-link input path does not save storage.
             if (!same_inode || fe->nlink > 1) ctx->already_saved += fe->size;
@@ -463,13 +610,10 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             return;
         }
 
-        // Skip if hardlinked and not forcing
-        if (!ctx->force && fe->nlink > 1) {
-            if (ctx->verbosity) {
-                OUTPUT_LOCK(ctx, {
-                    printf("skipping %s, hardlinked\n", fe->path);
-                });
-            }
+        // Skip if hardlinked and not forcing: replacing one name would split
+        // it from the others. Deduplicating in place keeps every name.
+        if (!ctx->force && fe->nlink > 1 && !dedupes_in_place(ctx)) {
+            skip_duplicate(ctx, fe, "hardlinked");
             free_signature(sig);
             visit_order_end(ctx);
             return;
@@ -478,12 +622,14 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
         // Skip if immutable or read-only
         if (fe->flags & UF_IMMUTABLE || fe->flags & SF_IMMUTABLE ||
             (access(fe->path, W_OK) != 0)) {
+            skip_duplicate(ctx, fe, "immutable or not writable");
             free_signature(sig);
             visit_order_end(ctx);
             return;
         }
 
         if (ctx->replace_mode == DEDUP_CLONE && !ctx->clone_converted) {
+            skip_duplicate(ctx, fe, "clone conversion disabled");
             free_signature(sig);
             visit_order_end(ctx);
             return;
@@ -500,6 +646,10 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             ctx->saved += fe->size;
             ctx->found++;
             pthread_mutex_unlock(&ctx->metrics_mutex);
+        } else if (dedupes_in_place(ctx)) {
+#if defined(DEDUP_IN_PLACE)
+            dedupe_duplicate_in_place(ctx, fe, existing->path);
+#endif
         } else {
             int result = 0;
             switch (ctx->replace_mode) {
@@ -516,8 +666,9 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
             }
 
             if (result) {
-                report_error(ctx, fe->path, "cannot replace duplicate",
-                             result > 0 ? result : (errno ? errno : EIO));
+                // The replace_* functions print the system error; name the
+                // file that was left alone.
+                fail_duplicate(ctx, fe, existing->path);
                 free_signature(sig);
                 visit_order_end(ctx);
                 return;
@@ -530,6 +681,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
                 // Verify clone worked if using clone mode
                 if (ctx->replace_mode == DEDUP_CLONE) {
+#if defined(__APPLE__)
                     uint64_t new_clone_id = get_clone_id(fe->path);
                     if (new_clone_id != existing->clone_id) {
                         if (private_size(fe->path) != 0) {
@@ -537,6 +689,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                         }
                         // Else: clone_id mismatch but no private data = success
                     }
+#endif
                 }
 
                 if (result == 0) {
@@ -551,6 +704,9 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
                     }
                 } else {
                     report_error(ctx, fe->path, "cannot verify cloned data", EIO);
+                    pthread_mutex_lock(&ctx->metrics_mutex);
+                    ctx->failed++;
+                    pthread_mutex_unlock(&ctx->metrics_mutex);
                 }
             }
         }
@@ -647,21 +803,12 @@ void* prune_work(void* ctx) {
 
         // Survivor: pass to work queue
         // queued_count stays the same (file moves between queues)
-        SYNC(c->queue_mutex, {
-            file_entry_queue_append(c->queue,
-                                    fe->path,
-                                    fe->device,
-                                    fe->inode,
-                                    fe->nlink,
-                                    fe->flags,
-                                    fe->size,
-                                    fe->sequence,
-                                    fe->level);
-        });
-        
-        // Show pruner progress (survivor passes through)
+        // Show pruner progress (survivor passes through) before the hand-off:
+        // once queued, a worker may take and free the entry.
         display_status(c, fe->path);
-        file_entry_free(fe);
+        SYNC(c->queue_mutex, {
+            file_entry_queue_push(c->queue, fe);
+        });
     }
 
     free_seen_set(seen_inodes);
@@ -719,6 +866,9 @@ void* dedup_work(void* ctx) {
     return NULL;
 }
 
+#if defined(__APPLE__)
+// The two-phase replacement over file metadata sets; it needs the Apple-only
+// file metadata and clone-size helpers.
 size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
     FileMetadata* origin = NULL;
     char* reason = NULL;
@@ -891,6 +1041,8 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
     return 0;
 }
 
+#endif // __APPLE__
+
 __attribute__((noreturn))
 static void usage(char* pgm, DedupContext* ctx, int status) {
     fprintf(stderr,
@@ -902,7 +1054,8 @@ static void usage(char* pgm, DedupContext* ctx, int status) {
                 "  --dry-run, -n            Don't replace file content; just print what \n"
                 "                           would have happened.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
-                "  --format, -F format      Output format for byte sizes.\n"
+                "  --format, -F format      Output format for byte sizes. Use '-F help' to\n"
+                "                           list the formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
                 "                           than the starting paths.\n"
                 "  --link, -l               Use hardlinks instead of clones.\n"
@@ -943,9 +1096,14 @@ static unsigned long parse_count(const char* value, unsigned long maximum,
 
 __attribute__((const))
 int32_t cpu_count() {
+#if defined(__APPLE__) || defined(__FreeBSD__)
     int32_t c = 0;
     size_t len = sizeof(int32_t);
     sysctlbyname("hw.ncpu", &c, &len, NULL, 0);
+#else
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    int32_t c = online > 0 ? (int32_t)(online > INT32_MAX ? INT32_MAX : online) : 1;
+#endif
     return c < 1 ? 1 : (c > UINT8_MAX ? UINT8_MAX : c);
 }
 
@@ -1000,7 +1158,7 @@ bool is_clonefile_supported(char* path) {
     return is_vol_cap_supported(path, VOL_CAP_INT_CLONE);
 #else
     (void)path;
-    return backend_is_available(BACKEND_FICLONE);
+    return backend_is_available(BACKEND_FIDEDUPERANGE);
 #endif
 }
 
@@ -1143,6 +1301,11 @@ int main(int argc, char* argv[]) {
                 max_depth = parse_count(optarg, UINT16_MAX, "Depth");
                 break;
             case 'F':
+                if (strcmp(optarg, "help") == 0 || strcmp(optarg, "formats") == 0 ||
+                    strcmp(optarg, "list") == 0 || strcmp(optarg, "?") == 0) {
+                    list_available_formats(stdout);
+                    exit(EXIT_SUCCESS);
+                }
                 dc.output_format = parse_output_format(optarg);
                 break;
             case 'h':
@@ -1266,12 +1429,14 @@ int main(int argc, char* argv[]) {
     }
     dc.thread_count = started_threads;
 
-    pthread_t pruner_thread = NULL;
+    // pthread_t is opaque (a pointer on Apple platforms, an integer on glibc),
+    // so record whether the pruner started instead of testing the handle.
+    pthread_t pruner_thread;
+    bool pruner_started = false;
     if (dc.thread_count > 0) {
         int r = pthread_create(&pruner_thread, NULL, prune_work, &dc);
         if (r) {
             warnx("Could not create pruner: %s; running serially", strerror(r));
-            pruner_thread = NULL;
             pthread_mutex_lock(&dc.prune_done_mutex);
             dc.prune_done = 1;
             pthread_mutex_unlock(&dc.prune_done_mutex);
@@ -1279,6 +1444,8 @@ int main(int argc, char* argv[]) {
             started_threads = 0;
             dc.thread_count = 0;
             dc.prune_done = 0;
+        } else {
+            pruner_started = true;
         }
     }
 
@@ -1305,6 +1472,33 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+#if defined(DEDUP_IN_PLACE)
+        // FIDEDUPERANGE can only be asked about a regular file, so decide at
+        // the first candidate on each filesystem. A file that cannot answer
+        // (unreadable, say) goes through, and the next one is asked.
+        if (dc.replace_mode == DEDUP_CLONE &&
+            current_dev != entry->fts_statp->st_dev &&
+            (entry->fts_info == FTS_F || entry->fts_info == FTS_NSOK)) {
+            int supported = dedupe_supported(entry->fts_path);
+            if (supported >= 0) {
+                current_dev = entry->fts_statp->st_dev;
+                clonefile_supported = (supported == 1);
+                if (!clonefile_supported) {
+                    OUTPUT_LOCK(&dc, {
+                        warnx("Skipping %s and the rest of its filesystem: cloning not supported",
+                              entry->fts_path);
+                    });
+                    if (user_fts_options & FTS_XDEV) {
+                        fts_set(traversal, entry, FTS_SKIP);
+                        continue;
+                    }
+                }
+            } else {
+                current_dev = (dev_t)-1;
+                clonefile_supported = true;
+            }
+        }
+#else
         if (dc.replace_mode == DEDUP_CLONE &&
             current_dev != entry->fts_statp->st_dev) {
             current_dev = entry->fts_statp->st_dev;
@@ -1321,6 +1515,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+#endif
 
         if (dc.replace_mode == DEDUP_CLONE &&
             !clonefile_supported) {
@@ -1424,16 +1619,7 @@ int main(int argc, char* argv[]) {
                 file_entry_free(fe);
             } else {
                 // Survivor goes to work_queue (already counted in queued_count)
-                file_entry_queue_append(queue,
-                                        fe->path,
-                                        fe->device,
-                                        fe->inode,
-                                        fe->nlink,
-                                        fe->flags,
-                                        fe->size,
-                                        fe->sequence,
-                                        fe->level);
-                file_entry_free(fe);
+                file_entry_queue_push(queue, fe);
                 dedup_work(&dc);
             }
         } else {
@@ -1464,7 +1650,7 @@ int main(int argc, char* argv[]) {
     pthread_mutex_unlock(&dc.scan_done_mutex);
 
     // Wait for pruner to drain raw_queue
-    if (pruner_thread) {
+    if (pruner_started) {
         if (pthread_join(pruner_thread, NULL)) {
             fprintf(stderr, "Failed to wait for pruner thread\n");
         }
@@ -1479,9 +1665,8 @@ int main(int argc, char* argv[]) {
         // clang-analyzer thinks threads[i] can be NULL, but `pthread_t`
         // is an opaque type (to us). if `pthread_create` is successful
         // the API contract says we can pass that value to pthread_join.
-        // the assertion is less intrusive than suppressing the warning
-        // by checking for the _clang_analyzer macro
-        assert(threads[i] != NULL);
+        // `threads` is non-NULL whenever a thread was started
+        assert(threads != NULL);
         if (pthread_join(threads[i], NULL)) {
             fprintf(stderr, "Failed to wait for thread %i\n", i);
         }
@@ -1492,7 +1677,7 @@ int main(int argc, char* argv[]) {
     free_seen_set(st_seen_clones);
     free_file_entry_queue(raw_queue); raw_queue = NULL;
     free_file_entry_queue(queue); queue = NULL;
-    free_sig_table(dc.signatures); dc.signatures = NULL;
+    free_sig_table(dc.signatures, NULL); dc.signatures = NULL;
 
     if (dc.progress) {
         clear_progress();
@@ -1518,6 +1703,20 @@ int main(int argc, char* argv[]) {
         printf("%zu", dc.already_saved);
     }
     putchar('\n');
+
+    if (dc.skipped) {
+        printf("duplicates skipped: %zu (", dc.skipped);
+        if (human_readable) {
+            printf("%s", format_bytes(dc.skipped_bytes, dc.output_format));
+        } else {
+            printf("%zu", dc.skipped_bytes);
+        }
+        printf(")\n");
+    }
+
+    if (dc.failed) {
+        printf("replacements failed: %zu\n", dc.failed);
+    }
 
     // Clear status line
     if (dc.progress) {

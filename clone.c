@@ -42,6 +42,7 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +55,12 @@
 #endif
 #if defined(__linux__) || defined(HAVE_UBT)
 #include <fcntl.h>
+#endif
+#if defined(DEDUP_IN_PLACE)
+#include <linux/fiemap.h>
+#include <stdint.h>
+
+#include "extent_map.h"
 #endif
 
 static int find_zero_file(const char* restrict path) {
@@ -71,6 +78,19 @@ static int find_zero_file(const char* restrict path) {
     return 0;
 }
 
+#if !defined(__APPLE__)
+#include <libgen.h>
+#include <limits.h>
+static char* dirname_r(const char* path, char* buf) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    char* d = dirname(tmp);
+    if (!d) return NULL;
+    snprintf(buf, PATH_MAX, "%s", d);
+    return buf;
+}
+#endif
+
 // Expects `out` to be char[PATH_MAX].
 //
 char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
@@ -81,14 +101,27 @@ char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
     out[0] = '\0';
 
     char dir[PATH_MAX] = { 0 };
+    char base[PATH_MAX] = { 0 };
+#if defined(__APPLE__)
     if (!dirname_r(path, dir)) {
         return NULL;
     }
 
-    char base[PATH_MAX] = { 0 };
     if (!basename_r(path, base)) {
         return NULL;
     }
+#else
+    // POSIX dirname(3) and basename(3) may modify their argument and may
+    // return static storage, so split a private copy and copy the results.
+    char copy[PATH_MAX];
+    if (snprintf(copy, sizeof(copy), "%s", path) >= (int)sizeof(copy)) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+    snprintf(dir, sizeof(dir), "%s", dirname(copy));
+    snprintf(copy, sizeof(copy), "%s", path);
+    snprintf(base, sizeof(base), "%s", basename(copy));
+#endif
 
     long name_max = pathconf(dir, _PC_NAME_MAX);
     if (name_max < 0) name_max = NAME_MAX;
@@ -224,7 +257,11 @@ static int dir_mtime(const char* path, int* fd_out, struct timespec* mtime_out) 
     }
 
     *fd_out = fd;
+#if defined(__APPLE__)
     *mtime_out = st.st_mtimespec;
+#else
+    *mtime_out = st.st_mtim;
+#endif
     return 0;
 }
 
@@ -494,3 +531,270 @@ int replace_with_symlink(const char* src, const char* dst) {
     free(path);
     return 0;
 }
+
+#if defined(DEDUP_IN_PLACE)
+
+// Largest range handed to one FIDEDUPERANGE call. The kernel may shorten a
+// request anyway (older btrfs capped it at 16 MiB), and smaller calls bound
+// how long both files stay locked while the kernel compares them.
+#define DEDUPE_CHUNK ((uint64_t)16 << 20)
+
+typedef struct ExtentMap {
+    Extent* extents;
+    size_t count;
+    bool inline_data;      // data stored with metadata, never shareable
+    bool unknown_location; // no settled address even after flushing
+} ExtentMap;
+
+static uint32_t extent_flags(uint32_t fiemap_flags, ExtentMap* map) {
+    uint32_t flags = 0;
+    if (fiemap_flags & (FIEMAP_EXTENT_DATA_INLINE | FIEMAP_EXTENT_DATA_TAIL |
+                        FIEMAP_EXTENT_NOT_ALIGNED)) {
+        map->inline_data = true;
+        flags |= EXTENT_NOT_SHAREABLE;
+    }
+    if (fiemap_flags & (FIEMAP_EXTENT_UNKNOWN | FIEMAP_EXTENT_DELALLOC)) {
+        map->unknown_location = true;
+        flags |= EXTENT_NOT_SHAREABLE;
+    }
+    if (fiemap_flags & FIEMAP_EXTENT_ENCODED) {
+        flags |= EXTENT_ENCODED;
+    }
+    if (fiemap_flags & FIEMAP_EXTENT_SHARED) {
+        flags |= EXTENT_SHARED;
+    }
+    return flags;
+}
+
+// Reads the whole extent map of the file open at fd. The first request
+// flushes dirty data so that every extent has its final address. Returns 0,
+// or -1 with errno set.
+static int read_extent_map(int fd, ExtentMap* map) {
+    enum { BATCH = 256 };
+    memset(map, 0, sizeof(*map));
+
+    struct fiemap* fm = malloc(sizeof(*fm) + BATCH * sizeof(struct fiemap_extent));
+    if (!fm) {
+        return -1;
+    }
+
+    size_t capacity = 0;
+    uint64_t start = 0;
+    uint32_t sync = FIEMAP_FLAG_SYNC;
+    for (;;) {
+        memset(fm, 0, sizeof(*fm));
+        fm->fm_start = start;
+        fm->fm_length = FIEMAP_MAX_OFFSET - start;
+        fm->fm_flags = sync;
+        fm->fm_extent_count = BATCH;
+        if (ioctl(fd, FS_IOC_FIEMAP, fm) < 0) {
+            int e = errno;
+            free(fm);
+            free(map->extents);
+            memset(map, 0, sizeof(*map));
+            errno = e;
+            return -1;
+        }
+        sync = 0;
+
+        uint32_t mapped = fm->fm_mapped_extents;
+        if (mapped == 0) {
+            break;
+        }
+
+        if (map->count + mapped > capacity) {
+            size_t wanted = capacity ? capacity * 2 : BATCH;
+            while (wanted < map->count + mapped) {
+                wanted *= 2;
+            }
+            Extent* grown = realloc(map->extents, wanted * sizeof(Extent));
+            if (!grown) {
+                free(fm);
+                free(map->extents);
+                memset(map, 0, sizeof(*map));
+                errno = ENOMEM;
+                return -1;
+            }
+            map->extents = grown;
+            capacity = wanted;
+        }
+
+        bool last = false;
+        uint64_t previous = start;
+        for (uint32_t k = 0; k < mapped; k++) {
+            const struct fiemap_extent* fe = &fm->fm_extents[k];
+            uint32_t flags = extent_flags(fe->fe_flags, map);
+            map->extents[map->count++] = (Extent){
+                .logical = fe->fe_logical,
+                .physical = fe->fe_physical,
+                .length = fe->fe_length,
+                .flags = flags,
+            };
+            start = fe->fe_logical + fe->fe_length;
+            if (fe->fe_flags & FIEMAP_EXTENT_LAST) {
+                last = true;
+            }
+        }
+
+        // a short batch is the end of the map, as is a batch that does
+        // not move forward
+        if (last || mapped < BATCH || start <= previous) {
+            break;
+        }
+    }
+
+    free(fm);
+    return 0;
+}
+
+ShareState share_state(const char* origin, const char* duplicate, uint64_t size) {
+    ShareState state = SHARE_UNKNOWN;
+    ExtentMap a = { 0 };
+    ExtentMap b = { 0 };
+    struct stat as = { 0 };
+    struct stat bs = { 0 };
+
+    int fa = open(origin, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fb = fa < 0 ? -1 : open(duplicate, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fb < 0 || fstat(fa, &as) || fstat(fb, &bs) ||
+        read_extent_map(fa, &a) || read_extent_map(fb, &b)) {
+        goto done;
+    }
+
+    if (a.inline_data) {
+        state = SHARE_INLINE;
+    } else if (a.unknown_location || b.unknown_location) {
+        state = SHARE_UNKNOWN;
+    } else if (extent_map_count(a.extents, a.count, size, 0) == 0 &&
+               extent_map_count(b.extents, b.count, size, 0) == 0 &&
+               (as.st_blocks != 0 || bs.st_blocks != 0)) {
+        // no data in either map, yet blocks are allocated: the map is not
+        // telling the whole story, so do not call that shared
+        state = SHARE_UNKNOWN;
+    } else if (extent_maps_shared(a.extents, a.count, b.extents, b.count, size)) {
+        state = SHARE_SHARED;
+    } else {
+        state = SHARE_SEPARATE;
+    }
+
+done:
+    free(a.extents);
+    free(b.extents);
+    if (fb >= 0) {
+        close(fb);
+    }
+    if (fa >= 0) {
+        close(fa);
+    }
+    return state;
+}
+
+DedupeResult dedupe_in_place(const char* origin, const char* duplicate, uint64_t size) {
+    DedupeResult result = DEDUPE_FAILED;
+    struct file_dedupe_range* range = NULL;
+    struct stat ss = { 0 };
+    struct stat ds = { 0 };
+
+    int src = open(origin, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int dst = src < 0 ? -1 : open(duplicate, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (dst < 0 || fstat(src, &ss) || fstat(dst, &ds)) {
+        goto done;
+    }
+
+    if (!S_ISREG(ss.st_mode) || !S_ISREG(ds.st_mode) ||
+        (uint64_t)ss.st_size != size || (uint64_t)ds.st_size != size) {
+        result = DEDUPE_DIFFERS;
+        goto done;
+    }
+
+    size_t range_size = sizeof(*range) + sizeof(struct file_dedupe_range_info);
+    range = malloc(range_size);
+    if (!range) {
+        goto done;
+    }
+
+    uint64_t offset = 0;
+    while (offset < size) {
+        uint64_t length = size - offset;
+        if (length > DEDUPE_CHUNK) {
+            length = DEDUPE_CHUNK;
+        }
+
+        memset(range, 0, range_size);
+        range->src_offset = offset;
+        range->src_length = length;
+        range->dest_count = 1;
+        range->info[0].dest_fd = dst;
+        range->info[0].dest_offset = offset;
+        if (ioctl(src, FIDEDUPERANGE, range) < 0) {
+            goto done;
+        }
+
+        int32_t status = range->info[0].status;
+        if (status == FILE_DEDUPE_RANGE_DIFFERS) {
+            result = DEDUPE_DIFFERS;
+            goto done;
+        }
+        if (status < 0) {
+            errno = -status;
+            goto done;
+        }
+        if (range->info[0].bytes_deduped == 0) {
+            errno = EIO; // no progress; never loop forever
+            goto done;
+        }
+        offset += range->info[0].bytes_deduped;
+    }
+    result = DEDUPE_DONE;
+
+done:;
+    int saved_errno = errno;
+    free(range);
+    if (dst >= 0) {
+        close(dst);
+    }
+    if (src >= 0) {
+        close(src);
+    }
+    errno = saved_errno;
+    return result;
+}
+
+int dedupe_supported(const char* path) {
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+
+    size_t range_size = sizeof(struct file_dedupe_range) + sizeof(struct file_dedupe_range_info);
+    struct file_dedupe_range* range = calloc(1, range_size);
+    if (!range) {
+        close(fd);
+        return -1;
+    }
+
+    // zero bytes of the file onto itself: nothing to compare or share
+    range->dest_count = 1;
+    range->info[0].dest_fd = fd;
+
+    int supported;
+    if (ioctl(fd, FIDEDUPERANGE, range) == 0) {
+        if (range->info[0].status == FILE_DEDUPE_RANGE_SAME) {
+            supported = 1;
+        } else {
+            // e.g. EPERM: this user may not deduplicate this file
+            errno = range->info[0].status < 0 ? -range->info[0].status : EIO;
+            supported = -1;
+        }
+    } else {
+        supported = (errno == EOPNOTSUPP || errno == ENOTTY || errno == EINVAL) ? 0 : -1;
+    }
+
+    int saved_errno = errno;
+    free(range);
+    close(fd);
+    errno = saved_errno;
+    return supported;
+}
+
+#endif // DEDUP_IN_PLACE

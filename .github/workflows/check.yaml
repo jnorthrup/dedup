@@ -12,6 +12,7 @@ permissions:
 jobs:
   check:
     strategy:
+      fail-fast: false
       matrix:
         version: [26, 15, 14]
     runs-on: macOS-${{ matrix.version }}
@@ -28,3 +29,15 @@ jobs:
         run: make check
       - name: check build isolation
         run: make check-build-system
+
+  check-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install check and filesystem tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y check pkg-config btrfs-progs xfsprogs e2fsprogs attr acl
+      # root, to loop-mount the btrfs, XFS and ext4 images the tests use
+      - name: make check-linux
+        run: sudo make check-linux

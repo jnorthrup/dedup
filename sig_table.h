@@ -13,6 +13,7 @@ typedef struct SigTableEntry {
     FileSignature* signature;
     char* path;
     uint64_t clone_id;
+    void* data;                  // Caller's payload for this file, see sig_table_insert
     struct SigTableEntry* next;  // Collision chain
 } SigTableEntry;
 
@@ -20,24 +21,23 @@ typedef struct SigTableEntry {
 typedef struct SigTable {
     SigTableEntry** buckets;
     size_t bucket_count;
+    size_t mask;         // bucket_count - 1 (cached for fast bitwise indexing)
     size_t entry_count;
 } SigTable;
 
 // Create a new signature table
 SigTable* new_sig_table(size_t bucket_count);
 
-// Free signature table
-void free_sig_table(SigTable* table);
+// Free signature table. free_data, if not NULL, is called with each entry's
+// data.
+void free_sig_table(SigTable* table, void (*free_data)(void* data));
 
 // Insert or find matching signature
 // Returns:
-//   - Pointer to existing entry if match found (caller still owns sig)
-//   - NULL if successfully inserted new entry (table owns sig)
-//   - NULL if insertion failed (caller still owns sig, check table size)
-SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char* path, uint64_t clone_id);
-
-// Check if clone_id already seen
-bool sig_table_has_clone_id(const SigTable* table, uint64_t clone_id);
+//   - Pointer to existing entry if match found (caller still owns sig and data)
+//   - NULL if successfully inserted new entry (table owns sig and data)
+//   - NULL if insertion failed (caller still owns sig and data, check table size)
+SigTableEntry* sig_table_insert(SigTable* table, FileSignature* sig, const char* path, uint64_t clone_id, void* data);
 
 // Get statistics
 size_t sig_table_size(const SigTable* table);

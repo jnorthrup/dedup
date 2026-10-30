@@ -20,3 +20,8 @@ test/seen_set_check
 .cache/
 ubifs/libubt.a
 test/.build-config
+
+# Jules agent notes
+.jules/
+.Jules/
+dedup-fast

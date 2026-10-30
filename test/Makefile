@@ -6,14 +6,13 @@ COMMON_CFLAGS = \
     -Wall -Wextra -Werror -pedantic \
     -Wpointer-arith \
     -Wno-unused-parameter \
-    -Wp,-D_FORTIFY_SOURCE=2 \
+    -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
     -fexceptions \
     -fpic \
     -fprofile-arcs \
     -Wno-macro-redefined \
     --param=ssp-buffer-size=4  \
     -grecord-gcc-switches \
-    -m64 \
     -ftrapv \
     -pipe \
     -ftest-coverage \
@@ -44,6 +43,21 @@ TEST_OBJECTS = $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) output_format_test.o output_f
 FORCE:
 
 -include $(TEST_OBJECTS:.o=.d)
+
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Darwin)
+SUPPORT_OBJECTS += extent_map_test.o
+SUITE_OBJECTS += extent_map_suite.o seen_set_suite.o seen_set_support.o
+CHECK_LIBS = -lcheck
+else
+# Strict -std=c2x hides POSIX from glibc's headers (mkdtemp, PATH_MAX).
+COMMON_CFLAGS += -D_DEFAULT_SOURCE
+# The suites that need neither APFS nor disk images.
+SUPPORT_OBJECTS = runtime_caps_test.o runtime_dispatch_test.o signature_test.o sig_table_test.o extent_map_test.o
+SUITE_OBJECTS = dedup_check.o signature_suite.o runtime_dispatch_suite.o extent_map_suite.o seen_set_suite.o seen_set_support.o test_utils.o
+CHECK_LIBS = $(shell pkg-config --libs check 2>/dev/null || echo -lcheck)
+endif
 
 .PHONY: \
 	check check-fast check-linux FORCE \
@@ -78,45 +92,24 @@ output_format_support.o: ../output_format.c .build-config
 seen_set_check: seen_set_test.o .build-config
 	$(CC) $(TEST_CFLAGS) $(TEST_LDFLAGS) -o $@ seen_set_test.o $(LDLIBS)
 
-# Linux CI target: uses tmpfs/scratch dirs, no mount privileges needed.
-# Clone/HFS suites skipped unless running as root with btrfs loop device.
-# Symlink+link suites are the primary gates.
-check-linux: dedup_check setup-linux
-	./dedup_check --suite dedup_symlink
-	./dedup_check --suite dedup_link
-	@if [ "$(shell id -u)" = "0" ] && losetup -f >/dev/null 2>&1; then \
-		echo "root + loop available — running clone suite"; \
-		./dedup_check --suite dedup; \
-	else \
-		echo "skipping clone suite (needs root + loop btrfs)"; \
-	fi
-	rm -rf test-data-linux
+# seen_set.c compiled for seen_set_suite.o in dedup_check (seen_set_test.c is
+# the standalone seen_set_check program, so the usual %_test.o rule cannot name it).
+seen_set_support.o: ../seen_set.c .build-config
+	rm -f $(@:.o=.gcda)
+	$(CC) $(TEST_CPPFLAGS) $(TEST_CFLAGS) -MMD -MP -c -o $@ $<
 
-setup-linux:
-	rm -rf test-data-linux
-	mkdir -p test-data-linux/{bars,empty,big,same-size,same-first-last}
-	# "bar" test data
-	cd test-data-linux/bars && echo "foo" > bar && cp bar bar2 && ln bar bar3 && cp bar bar4 && cp bar bar5
-	# "empty" test data
-	cd test-data-linux/empty && touch empty && touch empty2
-	# "big" test data
-	dd if=/dev/urandom of=test-data-linux/big/big bs=1M count=4 2>/dev/null
-	dd if=/dev/urandom of=test-data-linux/big/big2 bs=1M count=4 2>/dev/null
-	# "same-size" test data
-	dd if=/dev/zero of=test-data-linux/same-size/big bs=1M count=1 2>/dev/null
-	dd if=/dev/zero of=test-data-linux/same-size/big2 bs=1M count=1 2>/dev/null
-	# "same-first-last" test data
-	dd if=/dev/urandom of=test-data-linux/same-first-last/big bs=1M count=4 2>/dev/null
-	dd if=/dev/urandom of=test-data-linux/same-first-last/big2 bs=1M count=4 2>/dev/null
-	echo "a" > test-data-linux/same-first-last/same-1
-	cat test-data-linux/same-first-last/big >> test-data-linux/same-first-last/same-1
-	echo "z" >> test-data-linux/same-first-last/same-1
-	echo "a" > test-data-linux/same-first-last/same-2
-	cat test-data-linux/same-first-last/big2 >> test-data-linux/same-first-last/same-2
-	echo "z" >> test-data-linux/same-first-last/same-2
+# Linux: the portable suites, then the filesystem tests, which loop-mount
+# btrfs, XFS and ext4 images and so need root.
+check-linux: dedup_check
+	./dedup_check
+	@if [ "$$(id -u)" = 0 ]; then \
+		./linux_fs_check.sh "$(DEDUP_TEST_BINARY)"; \
+	else \
+		echo "skipping the filesystem tests: they need root to loop-mount test filesystems"; \
+	fi
 
 dedup_check: $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) .build-config
-	$(CC) $(TEST_CFLAGS) $(TEST_LDFLAGS) -o $@ $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) -lcheck $(LDLIBS)
+	$(CC) $(TEST_CFLAGS) $(TEST_LDFLAGS) -o $@ $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) $(CHECK_LIBS) $(LDLIBS)
 
 $(SUPPORT_OBJECTS): %_test.o: ../%.c .build-config
 	rm -f $(@:.o=.gcda)
@@ -291,4 +284,4 @@ clean: clean-all-test-data
 	rm -f *.o *.d .build-config
 	rm -rf *.dSYM/
 	rm -f dedup_check output_format_check seen_set_check
-	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o
+	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o extent_map_test.o seen_set_support.o

@@ -150,7 +150,9 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     sig->device = device;
     sig->size = size;
 
-    char* buf = NULL;
+    // O_NONBLOCK keeps open(2) from hanging on a FIFO or device that replaced
+    // the file; fstat(2) below then rejects anything that is not a regular
+    // file. Reads on regular files ignore the flag, so no fcntl(2) is needed.
     int fd = open(path, O_RDONLY | O_NONBLOCK);
     if (fd < 0) {
         goto error;
@@ -175,6 +177,16 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
         return sig;
     }
 
+    // Read the first 4 KiB (or the whole file if smaller) once, into a stack
+    // buffer: it feeds the quick hash and, where a sample point falls inside
+    // it, the sample too, which saves up to four pread(2) calls per file and
+    // keeps malloc(3) out of the worker threads.
+    char buf[4096];
+    size_t hash_size = size < sizeof(buf) ? (size_t)size : sizeof(buf);
+    if (!read_exact_at(fd, buf, hash_size, 0)) {
+        goto error;
+    }
+
     // Sample at 4 strategic positions
     off_t positions[4] = {
         0,                               // Start
@@ -183,34 +195,19 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
         (off_t)(size > 4 ? size - 4 : 0) // End (or start if file < 4 bytes)
     };
 
-#ifdef __ARM_NEON
-    if (size >= 16) {
-        char samples_buf[16] __attribute__((aligned(16)));
-        for (int i = 0; i < 4; i++) {
-            if (!read_exact_at(fd, &samples_buf[i * 4], 4, positions[i])) {
-                goto error;
-            }
+    for (int i = 0; i < 4; i++) {
+        uint64_t pos = (uint64_t)positions[i];
+        if (pos + sizeof(int32_t) <= hash_size) {
+            memcpy(&sig->samples[i], buf + pos, sizeof(int32_t));
+        } else if (hash_size == size && pos < size) {
+            // The whole file is in buf and fewer than four bytes remain at
+            // this position: zero-pad, as read_sample_into does.
+            unsigned char raw[sizeof(int32_t)] = {0};
+            memcpy(raw, buf + pos, (size_t)(size - pos));
+            memcpy(&sig->samples[i], raw, sizeof(raw));
+        } else if (!read_sample_into(fd, positions[i], size, &sig->samples[i])) {
+            goto error;
         }
-        int32x4_t samples_vec = vld1q_s32((int32_t*)samples_buf);
-        vst1q_s32(sig->samples, samples_vec);
-    } else
-#endif
-    {
-        for (int i = 0; i < 4; i++) {
-            if (!read_sample_into(fd, positions[i], size, &sig->samples[i])) {
-                goto error;
-            }
-        }
-    }
-
-    size_t hash_size = size < 4096 ? (size_t)size : 4096U;
-    buf = malloc(hash_size);
-    if (!buf) {
-        goto error;
-    }
-
-    if (!read_exact_at(fd, buf, hash_size, 0)) {
-        goto error;
     }
 
     dedup_fast_hash_fn hash_fn = signature_fast_hash_bytes;
@@ -220,14 +217,12 @@ FileSignature* compute_signature(const char* path, dev_t device, uint64_t size) 
     }
     sig->quick_hash = hash_fn(buf, hash_size);
 
-    free(buf);
     close(fd);
 
     return sig;
 
 error: {
     int saved_errno = errno;
-    free(buf);
     if (fd >= 0) {
         close(fd);
     }

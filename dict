@@ -61,3 +61,9 @@ CLI
 KiB
 nv
 si
+filesystems
+tmpfs
+xfsprogs
+deduplicates
+FIDEDUPERANGE
+fideduperange

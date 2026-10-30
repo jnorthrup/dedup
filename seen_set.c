@@ -29,20 +29,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define EMPTY    0
-#define OCCUPIED 1
-
+// A slot is 16 bytes, not 24: no per-slot state byte (and its 7 bytes of
+// padding), so the table is a third smaller and four slots share a cache line.
+// An all-zero slot is empty. The one pair that would look empty, (0, 0), is
+// tracked by `has_zero` instead, so every 64-bit pair stays exact.
 typedef struct {
     uint64_t device;
     uint64_t id;
-    uint8_t  state;
 } Slot;
 
 struct SeenSet {
     Slot*  slots;
     size_t capacity; // always a power of 2
-    size_t count;
+    size_t count;    // pairs in `slots`, not counting (0, 0)
+    bool   has_zero; // (0, 0) has been inserted
 };
+
+static inline bool slot_empty(const Slot* slot) {
+    return slot->device == 0 && slot->id == 0;
+}
 
 static size_t next_power_of_2(size_t v) {
     size_t power = 1;
@@ -69,6 +74,7 @@ SeenSet* new_seen_set(size_t capacity) {
 
     set->capacity = capacity;
     set->count = 0;
+    set->has_zero = false;
     return set;
 }
 
@@ -93,10 +99,10 @@ static bool seen_set_grow(SeenSet* set) {
 
     size_t mask = new_cap - 1;
     for (size_t i = 0; i < set->capacity; i++) {
-        if (set->slots[i].state != OCCUPIED) continue;
+        if (slot_empty(&set->slots[i])) continue;
         Slot slot = set->slots[i];
         size_t idx = hash_key(slot.device, slot.id, mask);
-        while (new_slots[idx].state == OCCUPIED) {
+        while (!slot_empty(&new_slots[idx])) {
             idx = (idx + 1) & mask;
         }
         new_slots[idx] = slot;
@@ -111,11 +117,17 @@ static bool seen_set_grow(SeenSet* set) {
 bool seen_set_insert(SeenSet* set, uint64_t device, uint64_t id) {
     if (!set) return false;
 
+    if (device == 0 && id == 0) {
+        if (set->has_zero) return true;
+        set->has_zero = true;
+        return false;
+    }
+
     size_t mask = set->capacity - 1;
     size_t idx = hash_key(device, id, mask);
 
     for (size_t probes = 0; probes < set->capacity; probes++) {
-        if (set->slots[idx].state != OCCUPIED) break;
+        if (slot_empty(&set->slots[idx])) break;
         if (set->slots[idx].device == device && set->slots[idx].id == id) {
             return true; // already present
         }
@@ -128,14 +140,13 @@ bool seen_set_insert(SeenSet* set, uint64_t device, uint64_t id) {
         if (!seen_set_grow(set)) return false;
         mask = set->capacity - 1;
         idx = hash_key(device, id, mask);
-        while (set->slots[idx].state == OCCUPIED) {
+        while (!slot_empty(&set->slots[idx])) {
             idx = (idx + 1) & mask;
         }
     }
 
     set->slots[idx].device = device;
     set->slots[idx].id = id;
-    set->slots[idx].state = OCCUPIED;
     set->count++;
     return false; // newly inserted
 }

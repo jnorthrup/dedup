@@ -24,9 +24,11 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#if defined(__APPLE__)
 #include <sys/attr.h>
-#include <sys/stat.h>
 #include <sys/acl.h>
+#endif
+#include <sys/stat.h>
 
 #include <check.h>
 #include <stdio.h>
@@ -174,9 +176,27 @@ START_TEST(dedup_help) {
     ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 
+START_TEST(dedup_ignore_refused) {
+    // -I is not implemented. Running anyway would replace files the caller
+    // asked to exclude, so dedup must refuse before touching anything.
+    int r = system(DEDUP_COMMAND " -I bar test-data/clonefile/empty");
+    ck_assert_int_eq(1, WEXITSTATUS(r));
+} END_TEST
+
 START_TEST(dedup_dry_run) {
     int r = system(DEDUP_COMMAND " -nP /Volumes/dedup-test-hfs-clonefile test-data/clonefile/bars");
     ck_assert_int_eq(0, WEXITSTATUS(r));
+} END_TEST
+
+START_TEST(dedup_dry_run_reports_without_terminal) {
+    // run() reads stdout through a pipe, so no status line is drawn. The
+    // dry-run plan must be printed anyway.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/report"
+                               " && printf report > test-data/clonefile/report/a"
+                               " && cp test-data/clonefile/report/a test-data/clonefile/report/b"));
+    char* output = run(DEDUP_COMMAND " -nv test-data/clonefile/report");
+    ck_assert_ptr_nonnull(strstr(output, "would deduplicate test-data/clonefile/report/"));
+    free(output);
 } END_TEST
 
 START_TEST(dedup_permission_denied) {
@@ -185,6 +205,10 @@ START_TEST(dedup_permission_denied) {
     ck_assert_ptr_null(strstr(output, "could not getattrlist"));
     free(output);
 } END_TEST
+
+#if defined(__APPLE__)
+#define st_mtim st_mtimespec
+#endif
 
 #define ck_assert_timespec_eq(t1, t2) \
     ck_assert_msg(((t1).tv_sec == (t2).tv_sec && (t1).tv_nsec == (t2).tv_nsec), \
@@ -206,7 +230,7 @@ START_TEST(dedup_preserve_mtime) {
     ck_assert_int_eq(0, WEXITSTATUS(r));
 
     stat("test-data/clonefile/mtime", &after);
-    ck_assert_timespec_eq(before.st_mtimespec, after.st_mtimespec);
+    ck_assert_timespec_eq(before.st_mtim, after.st_mtim);
 
     // atime is explicitly omitted from restoration (UTIME_OMIT). it may
     // or may not advance due to directory reads but we do not assert it
@@ -222,7 +246,7 @@ START_TEST(dedup_do_not_preserve_mtime) {
     ck_assert_int_eq(0, WEXITSTATUS(r));
 
     stat("test-data/clonefile/mtime-not-preserved", &after);
-    ck_assert_timespec_ne(before.st_mtimespec, after.st_mtimespec);
+    ck_assert_timespec_ne(before.st_mtim, after.st_mtim);
 } END_TEST
 
 
@@ -247,7 +271,7 @@ START_TEST(dedup_preserve_mtime_relative_cwd) {
     chdir(cwd);
 
     ck_assert_int_eq(0, WEXITSTATUS(r));
-    ck_assert_timespec_eq(before.st_mtimespec, after.st_mtimespec);
+    ck_assert_timespec_eq(before.st_mtim, after.st_mtim);
 } END_TEST
 
 /*
@@ -268,6 +292,67 @@ START_TEST(dedup_parent_mtime_immutable) {
 } END_TEST
 */
 
+START_TEST(dedup_failed_replacement_exit_status) {
+    // A duplicate in a directory that is not writable cannot be replaced. The
+    // run must name it, count it, and exit nonzero.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/readonly-dir"
+                               " && printf locked > test-data/clonefile/readonly-dir/a"
+                               " && cp test-data/clonefile/readonly-dir/a test-data/clonefile/readonly-dir/b"
+                               " && chmod 555 test-data/clonefile/readonly-dir"));
+    char output[2048] = { 0 };
+    FILE* pout = popen(DEDUP_COMMAND " -P test-data/clonefile/readonly-dir 2>&1", "r");
+    ck_assert_ptr_nonnull(pout);
+    size_t read = fread(output, 1, sizeof(output) - 1, pout);
+    int r = pclose(pout);
+    // restore first, so the fixture can be removed even if an assertion fails
+    ck_assert_int_eq(0, system("chmod 755 test-data/clonefile/readonly-dir"));
+
+    ck_assert_uint_gt(read, 0);
+    ck_assert_int_eq(1, WEXITSTATUS(r));
+    ck_assert_ptr_nonnull(strstr(output, "could not replace test-data/clonefile/readonly-dir/"));
+    ck_assert_ptr_nonnull(strstr(output, "replacements failed: 1\n"));
+} END_TEST
+
+START_TEST(dedup_skipped_not_counted_as_saved) {
+    // Read-only duplicates are left in place. They are still stored twice, so
+    // they must be reported as skipped, not as space already saved.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/readonly-files"
+                               " && printf readonly > test-data/clonefile/readonly-files/a"
+                               " && cp test-data/clonefile/readonly-files/a test-data/clonefile/readonly-files/b"
+                               " && chmod 444 test-data/clonefile/readonly-files/a"
+                               " test-data/clonefile/readonly-files/b"));
+    char* output = run(DEDUP_COMMAND " -P test-data/clonefile/readonly-files");
+    ck_assert_str_eq("duplicates found: 0\nentries pruned: 0\nbytes saved: 0 bytes\n"
+                     "already saved: 0 bytes\nduplicates skipped: 1 (8 bytes)\n", output);
+    free(output);
+} END_TEST
+
+START_TEST(dedup_keeps_existing_clones) {
+    // "bar" and "bar4" are clones of each other and "bar2" is a separate copy.
+    // Whatever order the directory lists them in, the clones are the origin:
+    // only "bar2" is replaced, and the clone is space already saved.
+    ck_assert_int_eq(0, system("mkdir -p test-data/clonefile/clone-family"
+                               " && printf family > test-data/clonefile/clone-family/bar"
+                               " && cp -c test-data/clonefile/clone-family/bar"
+                               " test-data/clonefile/clone-family/bar4"
+                               " && cp test-data/clonefile/clone-family/bar"
+                               " test-data/clonefile/clone-family/bar2"));
+    uint64_t family = get_clone_id("test-data/clonefile/clone-family/bar");
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar4"));
+    ck_assert_uint_ne(family, get_clone_id("test-data/clonefile/clone-family/bar2"));
+
+    char* output = run(DEDUP_COMMAND " -P test-data/clonefile/clone-family");
+    // The pruner drops "bar4" before comparison: its clone id was already
+    // seen, so it counts as pruned and as space already saved.
+    ck_assert_str_eq("duplicates found: 1\nentries pruned: 1\nbytes saved: 6 bytes\n"
+                     "already saved: 6 bytes\n", output);
+    free(output);
+
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar"));
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar4"));
+    ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar2"));
+} END_TEST
+
 Suite* dedup_suite() {
     TCase* tc = tcase_create("dedup");
     tcase_add_test(tc, dedup_empty);
@@ -281,12 +366,17 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_does_not_exist);
     tcase_add_test(tc, dedup_negative_threads);
     tcase_add_test(tc, dedup_help);
+    tcase_add_test(tc, dedup_ignore_refused);
     tcase_add_test(tc, dedup_dry_run);
+    tcase_add_test(tc, dedup_dry_run_reports_without_terminal);
     tcase_add_test(tc, dedup_permission_denied);
     tcase_add_test(tc, dedup_preserve_mtime);
     tcase_add_test(tc, dedup_do_not_preserve_mtime);
     tcase_add_test(tc, dedup_preserve_mtime_relative_cwd);
     // tcase_add_test(tc, dedup_parent_mtime_immutable);
+    tcase_add_test(tc, dedup_failed_replacement_exit_status);
+    tcase_add_test(tc, dedup_skipped_not_counted_as_saved);
+    tcase_add_test(tc, dedup_keeps_existing_clones);
 
     Suite* s = suite_create("dedup");
     suite_add_tcase(s, tc);

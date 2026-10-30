@@ -18,6 +18,7 @@
 #include "signature.h"
 
 static DedupRuntimeDispatch g_runtime_dispatch;
+// Initialized once, by whichever thread asks first (see runtime_caps.c).
 static atomic_bool g_runtime_dispatch_initialized = false;
 static pthread_mutex_t g_runtime_dispatch_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -221,12 +222,12 @@ static dedup_exact_compare_fn exact_backend_for_name(const char* name) {
 }
 
 const DedupRuntimeDispatch* dedup_runtime_dispatch_get(void) {
-    if (!atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_acquire)) {
-        pthread_mutex_lock(&g_runtime_dispatch_mutex);
-        if (atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_relaxed)) {
-            pthread_mutex_unlock(&g_runtime_dispatch_mutex);
-            return &g_runtime_dispatch;
-        }
+    if (atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_acquire)) {
+        return &g_runtime_dispatch;
+    }
+
+    pthread_mutex_lock(&g_runtime_dispatch_mutex);
+    if (!atomic_load_explicit(&g_runtime_dispatch_initialized, memory_order_relaxed)) {
         static const char* const fast_hash_names[] = { "xxhash", "rapidhash", "komihash", "blake3" };
         static const char* const strong_hash_names[] = { "none", "blake3", "sha3", "pmull_poly" };
         static const char* const witness_names[] = { "none", "cpu_witness", "gpu_witness_stream" };
@@ -301,8 +302,8 @@ const DedupRuntimeDispatch* dedup_runtime_dispatch_get(void) {
         }
 
         atomic_store_explicit(&g_runtime_dispatch_initialized, true, memory_order_release);
-        pthread_mutex_unlock(&g_runtime_dispatch_mutex);
     }
+    pthread_mutex_unlock(&g_runtime_dispatch_mutex);
 
     return &g_runtime_dispatch;
 }

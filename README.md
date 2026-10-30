@@ -161,7 +161,10 @@ The following options are available:
 
 # EXIT STATUS
 
-The **dedup** utility exits 0 on success and &gt;0 if an error occurs.
+The **dedup** utility exits 0 on success and &gt;0 if an error occurs. Each
+duplicate that could not be replaced is reported as it happens, the summary
+counts them (`replacements failed`), and the exit status is 1. Files and
+directories that cannot be read are reported but do not change the exit status.
 
 It is possible that during abnormal termination a temporary clone will be left
 before it is moved to the path it is replacing. In such cases a file with the
@@ -386,10 +389,36 @@ appropriate system calls.
 
 ### Linux
 
-Linux backend code is experimental. The current executable and integration
-suite still depend on macOS headers and APIs; `make check-linux` is not a
-working portability gate. Linux support requires completing the platform guards,
-filesystem capability detection, and test fixtures.
+Clone mode works on filesystems that can share blocks between files, such as
+btrfs and XFS created with reflink support (the default in current xfsprogs).
+Rather than replacing a duplicate with a clone, `dedup` asks the kernel to
+share its blocks in place with the `FIDEDUPERANGE` ioctl. The kernel compares
+both files under a lock first, so a file that changes while `dedup` runs is
+left alone. The duplicate keeps its inode, and with it its owner,
+permissions, timestamps, extended attributes, ACLs and hard links, so files
+with several hard links are deduplicated too.
+
+Some duplicates are left alone:
+
+- btrfs keeps small files (by default, those of 2048 bytes or less) inline
+  with metadata, where they cannot be shared. They are reported as skipped.
+- `dedup` asks each filesystem once, at the first file it finds there, whether
+  it can share blocks. Files on filesystems that cannot, such as ext4 and
+  tmpfs, are skipped with a warning. The question cannot tell whether XFS was
+  created with reflink: on XFS without it, each duplicate fails with
+  "Operation not supported".
+
+`--link` and `--symlink` work on any filesystem.
+
+`dedup -v` names the clone backend: `clonefile` on macOS, `fideduperange` on
+Linux. It is fixed when `dedup` is built; the `DEDUP_BACKEND` environment
+variable (`clonefile`, `fideduperange`, `ubt` or `auto`) changes only the name
+shown, not the backend used.
+
+`make check-linux` runs the unit tests and, as root, `test/linux_fs_check.sh`,
+which loop-mounts btrfs, XFS and ext4 images to test clone mode. It needs
+`check`, `pkg-config`, `btrfs-progs`, `xfsprogs`, `e2fsprogs`, `attr` and
+`acl`.
 
 ### FreeBSD
 
