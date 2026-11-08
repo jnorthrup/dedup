@@ -1045,7 +1045,8 @@ size_t deduplicate(AList* metadata_set, DedupContext* ctx) {
 
 __attribute__((noreturn))
 static void usage(char* pgm, DedupContext* ctx, int status) {
-    fprintf(stderr,
+    FILE* stream = (status == EXIT_SUCCESS) ? stdout : stderr;
+    fprintf(stream,
             "%s\nusage: %s [-t n] [-PVhlmnsvxC] [-d n] [-F format] [-S file] [file ...]\n\n"
                 "Options:\n"
                 // "  --ignore, -I pattern     Exclude a pattern from being used as a clone\n"
@@ -1077,7 +1078,7 @@ static void usage(char* pgm, DedupContext* ctx, int status) {
             pgm,
             ctx->thread_count);
 
-    list_available_formats(stderr);
+    list_available_formats(stream);
     exit(status);
 }
 
@@ -1293,7 +1294,7 @@ int main(int argc, char* argv[]) {
                 dc.progress = NULL;
                 break;
             case 'V':
-                fprintf(stderr, "%s\n", version);
+                printf("%s\n", version);
                 return 0;
             case 'c':
                 errx(EXIT_FAILURE, "--color (-c) is not implemented; no files were processed");
