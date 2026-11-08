@@ -175,9 +175,9 @@ char* tmp_name(const char* restrict path, char* restrict out, size_t size) {
 
 static int genfile_clone(const char* src, const char* dst) {
 #if defined(HAVE_UBT)
-    int src_fd = open(src, O_RDONLY);
+    int src_fd = open(src, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (src_fd < 0) return errno;
-    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (dst_fd < 0) { int e = errno; close(src_fd); return e; }
     int r = ubt_clone(dst_fd, src_fd);
     int e = errno;
@@ -195,12 +195,12 @@ static int genfile_clone(const char* src, const char* dst) {
     //       frontend, so it's not even clear that the files
     //       that are being passed in here are on a partition
     //       that can be cloned.
-    int src_fd = open(src, O_RDONLY);
+    int src_fd = open(src, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (src_fd < 0) {
         perror("open(2) failed");
         return errno;
     }
-    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    int dst_fd = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (dst_fd < 0) {
         int e = errno;
         close(src_fd);
@@ -216,9 +216,9 @@ static int genfile_clone(const char* src, const char* dst) {
     errno = errno_saved;
     return result;
 #elif defined(__linux__)
-    int s = open(src, O_RDONLY);
+    int s = open(src, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (s < 0) return errno;
-    int d = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    int d = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (d < 0) { int e = errno; close(s); return e; }
     int r = ioctl(d, FICLONE, s);   /* <linux/fs.h> */
     int e = errno;
@@ -243,7 +243,11 @@ static int dir_mtime(const char* path, int* fd_out, struct timespec* mtime_out) 
         return -1;
     }
 
-    int fd = open(parent, O_RDONLY);
+#if defined(O_DIRECTORY)
+    int fd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+#else
+    int fd = open(parent, O_RDONLY | O_CLOEXEC);
+#endif
     if (fd == -1) {
         perror("open parent dir");
         return -1;

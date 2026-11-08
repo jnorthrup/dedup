@@ -156,7 +156,13 @@ static size_t clone_summary_count = 0;
 static int clone_summary_open(const char* filepath) {
     pthread_mutex_lock(&clone_summary_mutex);
     if (!clone_summary_stream) {
+#if defined(O_NOFOLLOW) && defined(O_CLOEXEC)
+        int fd = open(filepath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+#elif defined(O_CLOEXEC)
+        int fd = open(filepath, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+#else
         int fd = open(filepath, O_WRONLY | O_CREAT | O_EXCL, 0600);
+#endif
         if (fd >= 0) {
             clone_summary_stream = fdopen(fd, "w");
             if (!clone_summary_stream) {
