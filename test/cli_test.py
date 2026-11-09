@@ -124,7 +124,8 @@ class DedupCLI(unittest.TestCase):
             with self.subTest(option=option):
                 result = self.run_dedup(option)
                 self.assert_success(result)
-                self.assertIn(expected, (result.stdout + result.stderr).lower())
+                self.assertIn(expected, result.stdout.lower())
+                self.assertEqual(result.stderr, "")
 
     def test_invalid_numeric_options_are_rejected(self):
         path = self.make_file("input")
