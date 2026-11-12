@@ -153,14 +153,14 @@ START_TEST(dedup_symlink_flags_acls) {
     stat("test-data/symlink/flags-acls/bar", &b1);
     stat("test-data/symlink/flags-acls/bar3", &b3);
 
-    // symlink reads through to target's permissions
-    ck_assert_int_eq(0644 | S_IFREG, b3.st_mode);
-    ck_assert_uint_eq(get_clone_id("test-data/symlink/flags-acls/bar"),
-                      get_clone_id("test-data/symlink/flags-acls/bar3"));
+    // a symlink reads through to the target's permissions, so bar3 is
+    // skipped and keeps its own permissions and ACL
+    ck_assert_int_eq(0642 | S_IFREG, b3.st_mode);
+    ck_assert_uint_ne(b1.st_ino, b3.st_ino);
 
-    // the ACL is going to get nuked
     acl_t acl = acl_get_file("test-data/symlink/flags-acls/bar3", ACL_TYPE_EXTENDED);
-    ck_assert_ptr_null(acl);
+    ck_assert_ptr_nonnull(acl);
+    acl_free(acl);
 } END_TEST
 
 START_TEST(dedup_symlink_hfs) {

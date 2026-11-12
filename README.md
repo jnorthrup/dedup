@@ -130,6 +130,14 @@ The following options are available:
 > rejected to protect input files from accidental truncation. The summary is
 > excluded from scanning. Failure to create or write it returns an error.
 
+**Ordering by program name**
+
+> Run through a symbolic link named `dedup-large-dfs`, `dedup` visits the
+> files in each directory largest first. Named `dedup-small-dfs`, it visits
+> them smallest first, which reaches the most files soonest. The traversal
+> stays depth-first and files that already have several hard links are still
+> visited first. Any other name keeps the default order, by name.
+
 **-C**, **-&#45;no-clone-conversion**
 
 > Skip replacements in clone mode. This also applies to dry-run estimates.

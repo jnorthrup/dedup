@@ -31,8 +31,10 @@
 #include <sys/stat.h>
 
 #include <check.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "../utils.h"
@@ -140,14 +142,14 @@ START_TEST(dedup_link_flags_acls) {
     stat("test-data/link/flags-acls/bar", &b1);
     stat("test-data/link/flags-acls/bar3", &b3);
 
-    // unlink the clone version, the link version's mode will be set
-    ck_assert_int_eq(0644 | S_IFREG, b3.st_mode);
-    ck_assert_uint_eq(get_clone_id("test-data/link/flags-acls/bar"),
-                      get_clone_id("test-data/link/flags-acls/bar3"));
+    // linking would give bar3 the origin's mode and drop its ACL, so it is
+    // skipped and keeps its own permissions
+    ck_assert_int_eq(0642 | S_IFREG, b3.st_mode);
+    ck_assert_uint_ne(b1.st_ino, b3.st_ino);
 
-    // the ACL will no longer exist
     acl_t acl = acl_get_file("test-data/link/flags-acls/bar3", ACL_TYPE_EXTENDED);
-    ck_assert_ptr_null(acl);
+    ck_assert_ptr_nonnull(acl);
+    acl_free(acl);
 } END_TEST
 
 START_TEST(dedup_link_hfs) {
@@ -192,6 +194,56 @@ START_TEST(dedup_link_dry_run) {
     ck_assert_int_eq(0, WEXITSTATUS(r));
 } END_TEST
 
+// Linking or symlinking would give the duplicate the origin's permissions, so
+// files whose permissions differ are left alone; matching ones are replaced.
+START_TEST(dedup_link_skips_permission_mismatch) {
+    const char* flags[] = { "-l", "-s" };
+    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+        char dir[] = "/tmp/dedup-perm-XXXXXX";
+        ck_assert_ptr_nonnull(mkdtemp(dir));
+
+        char a[PATH_MAX], b[PATH_MAX], c[PATH_MAX];
+        snprintf(a, sizeof(a), "%s/a", dir);
+        snprintf(b, sizeof(b), "%s/b", dir);
+        snprintf(c, sizeof(c), "%s/c", dir);
+
+        char content[8192];
+        memset(content, 'x', sizeof(content));
+        const char* paths[] = { a, b, c };
+        const mode_t modes[] = { 0600, 0644, 0600 };
+        for (size_t f = 0; f < 3; f++) {
+            int fd = open(paths[f], O_WRONLY | O_CREAT | O_EXCL, 0600);
+            ck_assert_int_ge(fd, 0);
+            ck_assert_int_eq(write(fd, content, sizeof(content)), (ssize_t)sizeof(content));
+            ck_assert_int_eq(close(fd), 0);
+            ck_assert_int_eq(chmod(paths[f], modes[f]), 0);
+        }
+
+        char command[PATH_MAX + 64];
+        snprintf(command, sizeof(command), DEDUP_COMMAND " %s -P %s", flags[i], dir);
+        char* output = run(command);
+        ck_assert_ptr_nonnull(strstr(output, "duplicates skipped: 1"));
+        free(output);
+
+        // b (0644) differs from a and c (0600): it must remain a separate
+        // regular file with its own permissions.
+        struct stat sa, sb, sc;
+        ck_assert_int_eq(lstat(a, &sa), 0);
+        ck_assert_int_eq(lstat(b, &sb), 0);
+        ck_assert_int_eq(lstat(c, &sc), 0);
+        ck_assert(S_ISREG(sb.st_mode));
+        ck_assert_uint_eq(sb.st_mode & 07777, 0644);
+        ck_assert_uint_ne(sb.st_ino, sa.st_ino);
+        ck_assert_uint_ne(sb.st_ino, sc.st_ino);
+
+        // The pair with identical permissions was replaced.
+        ck_assert(sa.st_ino == sc.st_ino || S_ISLNK(sa.st_mode) || S_ISLNK(sc.st_mode));
+
+        for (size_t f = 0; f < 3; f++) unlink(paths[f]);
+        rmdir(dir);
+    }
+} END_TEST
+
 Suite* dedup_link_suite() {
     TCase* tc = tcase_create("dedup_link");
     tcase_add_test(tc, dedup_link_empty);
@@ -204,6 +256,7 @@ Suite* dedup_link_suite() {
     tcase_add_test(tc, dedup_link_hfs);
     tcase_add_test(tc, dedup_link_does_not_exist);
     tcase_add_test(tc, dedup_link_dry_run);
+    tcase_add_test(tc, dedup_link_skips_permission_mismatch);
 
     Suite* s = suite_create("dedup_link");
     suite_add_tcase(s, tc);

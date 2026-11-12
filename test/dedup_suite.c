@@ -32,7 +32,11 @@
 
 #include <check.h>
 #include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "../utils.h"
@@ -353,6 +357,184 @@ START_TEST(dedup_keeps_existing_clones) {
     ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar2"));
 } END_TEST
 
+// dedup-large-dfs and dedup-small-dfs are symlinks to dedup that visit the
+// siblings in a directory largest or smallest first. Plain dedup keeps name order.
+static void sibling_order_write(const char* dir, const char* name, char fill, size_t size) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    ck_assert_int_ge(fd, 0);
+    char* data = malloc(size);
+    ck_assert_ptr_nonnull(data);
+    memset(data, fill, size);
+    ck_assert_int_eq(write(fd, data, size), (ssize_t)size);
+    ck_assert_int_eq(close(fd), 0);
+    free(data);
+}
+
+static void sibling_order_check(const char* program, const char* expected) {
+    char dir[] = "/tmp/dedup-order-XXXXXX";
+    ck_assert_ptr_nonnull(mkdtemp(dir));
+    const char* names[] = { "a1", "a2", "b1", "b2", "c1", "c2" };
+    sibling_order_write(dir, "a1", 'a', 100);
+    sibling_order_write(dir, "a2", 'a', 100);
+    sibling_order_write(dir, "b1", 'b', 5000);
+    sibling_order_write(dir, "b2", 'b', 5000);
+    sibling_order_write(dir, "c1", 'c', 1000);
+    sibling_order_write(dir, "c2", 'c', 1000);
+
+    char binary[PATH_MAX], link[PATH_MAX];
+    ck_assert_ptr_nonnull(realpath(DEDUP_TEST_BINARY, binary));
+    snprintf(link, sizeof(link), "%s/%s", dir, program);
+    ck_assert_int_eq(symlink(binary, link), 0);
+
+    // The program link lives beside the data, so scan a subdirectory.
+    char data[PATH_MAX];
+    snprintf(data, sizeof(data), "%s/data", dir);
+    ck_assert_int_eq(mkdir(data, 0700), 0);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char from[PATH_MAX], to[PATH_MAX];
+        snprintf(from, sizeof(from), "%s/%s", dir, names[i]);
+        snprintf(to, sizeof(to), "%s/%s", data, names[i]);
+        ck_assert_int_eq(rename(from, to), 0);
+    }
+
+    char command[2 * PATH_MAX];
+    snprintf(command, sizeof(command), "\"%s\" -nvP \"%s\"", link, data);
+    char* output = run(command);
+    ck_assert_ptr_nonnull(output);
+
+    // Which duplicates would be replaced, in the order they were visited.
+    char seen[16] = { 0 };
+    for (const char* line = output; (line = strstr(line, "would deduplicate ")); line += 1) {
+        const char* end = strstr(line, " to ");
+        ck_assert_ptr_nonnull(end);
+        const char* slash = end;
+        while (slash > line && *slash != '/') slash--;
+        ck_assert_int_eq(*slash, '/');
+        ck_assert_uint_lt(strlen(seen), sizeof(seen) - 1);
+        seen[strlen(seen)] = slash[1];
+    }
+    ck_assert_str_eq(seen, expected);
+    free(output);
+
+    unlink(link);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", data, names[i]);
+        unlink(path);
+    }
+    rmdir(data);
+    rmdir(dir);
+}
+
+START_TEST(dedup_default_visits_siblings_by_name) {
+    sibling_order_check("dedup", "abc");
+} END_TEST
+
+START_TEST(dedup_large_dfs_visits_largest_siblings_first) {
+    sibling_order_check("dedup-large-dfs", "bca");
+} END_TEST
+
+START_TEST(dedup_small_dfs_visits_smallest_siblings_first) {
+    sibling_order_check("dedup-small-dfs", "acb");
+} END_TEST
+
+// Size ordering changes when each duplicate set is reached, never which file is
+// the origin: two identical files have equal sizes, so their relative order is
+// still decided by hard-link count, then name, then directory order. Build a tree
+// where a deep copy precedes a shallow one and a hard-linked group follows a
+// single-link copy, and require the same origin for every replacement.
+static void ordering_mkdirs(const char* path) {
+    char partial[PATH_MAX];
+    snprintf(partial, sizeof(partial), "%s", path);
+    for (char* p = partial + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(partial, 0700) != 0) ck_assert_int_eq(errno, EEXIST);
+        *p = '/';
+    }
+    if (mkdir(partial, 0700) != 0) ck_assert_int_eq(errno, EEXIST);
+}
+
+static int ordering_compare(const void* a, const void* b) {
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+
+static char* ordering_pairs(const char* link, const char* data) {
+    char command[2 * PATH_MAX];
+    snprintf(command, sizeof(command), "\"%s\" -nvP \"%s\"", link, data);
+    char* output = run(command);
+    ck_assert_ptr_nonnull(output);
+
+    char* lines[64];
+    size_t count = 0;
+    char* save = NULL;
+    for (char* line = strtok_r(output, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (strncmp(line, "would deduplicate ", 18) != 0) continue;
+        ck_assert_uint_lt(count, 64);
+        lines[count++] = line;
+    }
+    qsort(lines, count, sizeof(lines[0]), ordering_compare);
+
+    char* joined = calloc(1, 64 * (2 * PATH_MAX));
+    ck_assert_ptr_nonnull(joined);
+    for (size_t i = 0; i < count; i++) {
+        strcat(joined, lines[i]);
+        strcat(joined, "\n");
+    }
+    free(output);
+    return joined;
+}
+
+START_TEST(dedup_size_order_keeps_the_same_origin) {
+    char root[] = "/tmp/dedup-origin-XXXXXX";
+    ck_assert_ptr_nonnull(mkdtemp(root));
+    char data[PATH_MAX], path[PATH_MAX], other[PATH_MAX];
+    snprintf(data, sizeof(data), "%s/data", root);
+
+    const char* dirs[] = { "0/deep/er", "a", "z", "top" };
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", data, dirs[i]);
+        ordering_mkdirs(path);
+    }
+
+    // 'h': a deep single-link copy is visited before a shallow hard-linked
+    // group (a/hl1 + a/hl2) and a later single-link copy (z/h3).
+    sibling_order_write(data, "0/deep/er/h0", 'h', 700);
+    sibling_order_write(data, "a/hl1", 'h', 700);
+    snprintf(path, sizeof(path), "%s/a/hl1", data);
+    snprintf(other, sizeof(other), "%s/a/hl2", data);
+    ck_assert_int_eq(link(path, other), 0);
+    sibling_order_write(data, "z/h3", 'h', 700);
+    // 't': a shallow copy and a deeper one, with other sizes around them.
+    sibling_order_write(data, "top/t1", 't', 300);
+    sibling_order_write(data, "0/t2", 't', 300);
+    sibling_order_write(data, "top/u1", 'u', 5000);
+    sibling_order_write(data, "z/u2", 'u', 5000);
+    sibling_order_write(data, "a/s1", 's', 40);
+    sibling_order_write(data, "0/deep/s2", 's', 40);
+
+    char binary[PATH_MAX];
+    ck_assert_ptr_nonnull(realpath(DEDUP_TEST_BINARY, binary));
+    const char* programs[] = { "dedup", "dedup-large-dfs", "dedup-small-dfs" };
+    char* pairs[3];
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(path, sizeof(path), "%s/%s", root, programs[i]);
+        ck_assert_int_eq(symlink(binary, path), 0);
+        pairs[i] = ordering_pairs(path, data);
+    }
+
+    ck_assert_uint_gt(strlen(pairs[0]), 0);
+    ck_assert_str_eq(pairs[0], pairs[1]);
+    ck_assert_str_eq(pairs[0], pairs[2]);
+    for (size_t i = 0; i < 3; i++) free(pairs[i]);
+
+    char command[PATH_MAX + 16];
+    snprintf(command, sizeof(command), "rm -rf \"%s\"", root);
+    ck_assert_int_eq(system(command), 0);
+} END_TEST
+
 Suite* dedup_suite() {
     TCase* tc = tcase_create("dedup");
     tcase_add_test(tc, dedup_empty);
@@ -373,6 +555,10 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_preserve_mtime);
     tcase_add_test(tc, dedup_do_not_preserve_mtime);
     tcase_add_test(tc, dedup_preserve_mtime_relative_cwd);
+    tcase_add_test(tc, dedup_default_visits_siblings_by_name);
+    tcase_add_test(tc, dedup_large_dfs_visits_largest_siblings_first);
+    tcase_add_test(tc, dedup_small_dfs_visits_smallest_siblings_first);
+    tcase_add_test(tc, dedup_size_order_keeps_the_same_origin);
     // tcase_add_test(tc, dedup_parent_mtime_immutable);
     tcase_add_test(tc, dedup_failed_replacement_exit_status);
     tcase_add_test(tc, dedup_skipped_not_counted_as_saved);

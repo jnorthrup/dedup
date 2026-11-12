@@ -289,6 +289,15 @@ static void skip_duplicate(DedupContext* ctx, const FileEntry* fe, const char* r
     pthread_mutex_unlock(&ctx->metrics_mutex);
 }
 
+// True when both paths have the same owner, group and permission bits. A path
+// that cannot be examined is treated as different.
+static bool same_owner_and_mode(const char* a, const char* b) {
+    struct stat sa, sb;
+    if (lstat(a, &sa) != 0 || lstat(b, &sb) != 0) return false;
+    return sa.st_uid == sb.st_uid && sa.st_gid == sb.st_gid &&
+           (sa.st_mode & 07777) == (sb.st_mode & 07777);
+}
+
 // A replacement that failed. The replace_* functions print the system error;
 // this names the file left alone and fails the run's exit status.
 static void fail_duplicate(DedupContext* ctx, const FileEntry* fe, const char* origin) {
@@ -636,6 +645,17 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
 
         if (ctx->replace_mode == DEDUP_CLONE && !ctx->clone_converted) {
             skip_duplicate(ctx, fe, "clone conversion disabled");
+            free_signature(sig);
+            visit_order_end(ctx);
+            return;
+        }
+
+        // A link or symlink gives the duplicate the origin's owner and
+        // permissions, which can change who may read or write the data.
+        // Clone mode keeps the duplicate's own.
+        if (ctx->replace_mode != DEDUP_CLONE &&
+            !same_owner_and_mode(existing->path, fe->path)) {
+            skip_duplicate(ctx, fe, "owner or permissions differ from the origin");
             free_signature(sig);
             visit_order_end(ctx);
             return;
@@ -1181,12 +1201,35 @@ bool are_acls_supported(char* path) {
 #endif
 }
 
+// Sibling order within each directory, chosen by the name the program was
+// started as (see order_from_program_name). The traversal stays depth-first;
+// only the order in which siblings are visited changes. Not the default.
+static int sibling_size_order = 0;    // 1: largest first, -1: smallest first
+
+static int order_from_program_name(const char* argv0) {
+    const char* slash = argv0 ? strrchr(argv0, '/') : NULL;
+    const char* name = slash ? slash + 1 : (argv0 ? argv0 : "");
+    if (strcmp(name, "dedup-large-dfs") == 0) return 1;
+    if (strcmp(name, "dedup-small-dfs") == 0) return -1;
+    return 0;
+}
+
 static int traversal_order(const FTSENT** a, const FTSENT** b) {
     // Preserve existing hard-link groups by considering them as sources
     // before replaceable siblings. Break ties consistently across runs.
     nlink_t a_links = ((*a)->fts_info == FTS_F) ? (*a)->fts_statp->st_nlink : 0;
     nlink_t b_links = ((*b)->fts_info == FTS_F) ? (*b)->fts_statp->st_nlink : 0;
     if (a_links != b_links) return a_links > b_links ? -1 : 1;
+
+    // Only regular files carry a size key, so directories (links == 0 above)
+    // compare equal here and keep a total order by name.
+    if (sibling_size_order != 0) {
+        off_t a_size = ((*a)->fts_info == FTS_F) ? (*a)->fts_statp->st_size : 0;
+        off_t b_size = ((*b)->fts_info == FTS_F) ? (*b)->fts_statp->st_size : 0;
+        if (a_size != b_size) {
+            return (a_size > b_size) == (sibling_size_order > 0) ? -1 : 1;
+        }
+    }
     return strcmp((*a)->fts_name, (*b)->fts_name);
 }
 
@@ -1215,6 +1258,7 @@ static char* canonical_input_path(const char* path) {
 }
 
 int main(int argc, char* argv[]) {
+    sibling_size_order = order_from_program_name(argv[0]);
 
     FileEntryHead* queue = new_file_entry_queue();
     FileEntryHead* raw_queue = new_file_entry_queue();

@@ -232,6 +232,32 @@ static int genfile_clone(const char* src, const char* dst) {
 #endif
 }
 
+#if !defined(__APPLE__)
+// Gives the staged clone the owner, group and permission bits of the file it
+// replaces. chown(2) clears setuid/setgid, so the mode is applied last.
+// Returns 0 or an errno value; the caller keeps the original on failure.
+static int copy_owner_and_mode(const char* from, const char* staged) {
+    struct stat want;
+    if (lstat(from, &want) != 0) return errno;
+
+    int fd = open(staged, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno;
+
+    int result = 0;
+    struct stat have;
+    if (fstat(fd, &have) != 0) {
+        result = errno;
+    } else if ((want.st_uid != have.st_uid || want.st_gid != have.st_gid) &&
+               fchown(fd, want.st_uid, want.st_gid) != 0) {
+        result = errno;
+    } else if (fchmod(fd, want.st_mode & 07777) != 0) {
+        result = errno;
+    }
+    close(fd);
+    return result;
+}
+#endif
+
 // get the parent directory mtime and return it and a file descriptor
 // for the directory. if return is 0, caller is responsible for closing
 // the returned fd
@@ -384,6 +410,17 @@ int replace_with_clone(const char* src, const char* dst, bool preserve_parent_mt
             result = EIO;
             goto cleanup;
         }
+    }
+
+    // The staged file was created by this process, so it is owned by the
+    // effective user (root, when run as root) with mode 0600. Give it the
+    // duplicate's owner and permissions, or keep the duplicate.
+    result = copy_owner_and_mode(dst, path);
+    if (result) {
+        errno = result;
+        perror("could not copy owner and permissions");
+        unlink(path);
+        goto cleanup;
     }
 #endif
 

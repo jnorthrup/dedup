@@ -161,6 +161,11 @@ lists available formats.
 Write completed replacements to a new summary file. Existing paths are rejected
 and the summary is excluded from scanning. Failure to create or write it returns
 an error.
+.It Pa dedup-large-dfs , Pa dedup-small-dfs
+When started through a symbolic link with one of these names, visit the files in
+each directory largest first or smallest first. The traversal stays depth-first
+and files with several hard links are still visited first. Any other name keeps
+the default order, by name.
 .It Fl C , Fl Fl no-clone-conversion
 Skip replacements in clone mode, including dry-run estimates.
 .It Fl V , Fl Fl version

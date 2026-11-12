@@ -32,9 +32,12 @@
 /// The `replace_with_clone` function causes the link named `dst` to be
 /// replaced with a clone of `src`. Unlike `clonefile(2)`, it is expected
 /// that `dst` already exists. All metadata (mode, flags, & ACLs)
-/// are retained on `dst`. The current user must have read access to both
-/// `src` and `dst`, permission to copy the destination's metadata, and write
-/// access to the directory where `dst` resides. The source may be read-only.
+/// are retained on `dst` on macOS. Elsewhere the owner, group and permission
+/// bits are retained (flags, ACLs, xattrs and timestamps are not), and if
+/// they cannot be applied `dst` is left unchanged. The current user must have
+/// read access to both `src` and `dst`, permission to copy the destination's
+/// metadata, and write access to the directory where `dst` resides. The source
+/// may be read-only.
 ///
 /// `src` and `dst` must be on the same volume. (TODO: is it enough
 /// that they are with in the same APFS partition, can clones span

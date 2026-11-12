@@ -246,6 +246,30 @@ START_TEST(clone_accepts_readonly_source) {
     }
 } END_TEST
 
+START_TEST(clone_preserves_owner_and_mode) {
+    safety_write(safety_src, "source contents");
+    safety_write(safety_dst, "original destination");
+    ck_assert_int_eq(chmod(safety_dst, 0640), 0);
+
+    // Only root can give a file to someone else; the duplicate must keep its
+    // owner instead of becoming the root-owned file the clone starts as.
+    bool root = geteuid() == 0;
+    if (root) ck_assert_int_eq(chown(safety_dst, 12345, 23456), 0);
+
+    ck_assert_int_eq(replace_with_clone(safety_src, safety_dst, false), 0);
+
+    struct stat dst;
+    ck_assert_int_eq(stat(safety_dst, &dst), 0);
+    ck_assert_uint_eq(dst.st_mode & 07777, 0640);
+    if (root) {
+        ck_assert_uint_eq(dst.st_uid, 12345);
+        ck_assert_uint_eq(dst.st_gid, 23456);
+    } else {
+        ck_assert_uint_eq(dst.st_uid, geteuid());
+    }
+    safety_assert_content(safety_dst, "source contents");
+} END_TEST
+
 START_TEST(replacement_accepts_maximum_length_names) {
     long name_max = pathconf(safety_dir, _PC_NAME_MAX);
     ck_assert_int_gt(name_max, 3);
@@ -394,6 +418,7 @@ Suite* clone_suite() {
     tcase_add_test(safety, link_rename_failure_removes_staging_file);
     tcase_add_test(safety, replacement_preserves_staging_collision);
     tcase_add_test(safety, clone_accepts_readonly_source);
+    tcase_add_test(safety, clone_preserves_owner_and_mode);
     tcase_add_loop_test(safety, replacement_accepts_maximum_length_names, 0, 3);
     tcase_add_test(safety, relative_path_can_exceed_path_max);
     suite_add_tcase(s, safety);
