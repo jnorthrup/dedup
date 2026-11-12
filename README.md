@@ -90,6 +90,14 @@ The following options are available:
 > *depth*
 > directories deep into each provided path. Accepts integers from 0 to 65535.
 
+**-&#45;at-least** *size*, **-&#45;at-most** *size*
+
+> Only consider files whose size is at least, or at most, *size* bytes, bounds
+> included. A size is a number with an optional unit: `64k`, `1.5M` and `2G`
+> are powers of 1000, `64KiB` and `2GiB` are powers of 1024, and a bare number
+> is bytes. Files outside the range are left alone, and are neither sources nor
+> duplicates. The two options may be combined; an empty range is an error.
+
 **-h**
 
 > Display sizes using SI suffixes with 2-4 digits of precision.
@@ -132,11 +140,16 @@ The following options are available:
 
 **Ordering by program name**
 
-> Run through a symbolic link named `dedup-large-dfs`, `dedup` visits the
-> files in each directory largest first. Named `dedup-small-dfs`, it visits
-> them smallest first, which reaches the most files soonest. The traversal
-> stays depth-first and files that already have several hard links are still
-> visited first. Any other name keeps the default order, by name.
+> Run through a symbolic link named `dedup-large-dfs`, `dedup` hands the
+> largest file found so far to the next free worker, whichever directory it is
+> in. Named `dedup-small-dfs`, it hands out the smallest first, which reaches
+> the most files soonest. The scan itself stays depth-first, and each choice
+> is made among the files found and waiting at that moment, so a larger file
+> found later is next, but cannot overtake one a worker already took. This is
+> an ordering only: every file is still visited and none is excluded for being
+> small or large. Identical files keep their default relative order, so the
+> same file stays the source as in every other mode. Any other name keeps the
+> default order, by name.
 
 **-C**, **-&#45;no-clone-conversion**
 

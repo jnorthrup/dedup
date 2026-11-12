@@ -119,6 +119,44 @@ class DedupCLI(unittest.TestCase):
         for path, original in before.items():
             self.assertEqual((path.stat().st_ino, path.read_bytes()), original)
 
+    def test_size_range_filters_without_reordering(self):
+        self.make_file("small/a1", b"s" * 1000)
+        self.make_file("small/a2", b"s" * 1000)
+        self.make_file("mid/b1", b"m" * 5000)
+        self.make_file("mid/b2", b"m" * 5000)
+        self.make_file("big/c1", b"b" * 3000000)
+        self.make_file("big/c2", b"b" * 3000000)
+
+        def duplicates(*arguments):
+            result = self.run_dedup("-nvP", *arguments, ".")
+            self.assert_success(result)
+            return sorted(
+                line.split()[2][2:]
+                for line in result.stdout.splitlines()
+                if line.startswith("would deduplicate")
+            )
+
+        self.assertEqual(duplicates(), ["big/c2", "mid/b2", "small/a2"])
+        self.assertEqual(duplicates("--at-least", "2k"), ["big/c2", "mid/b2"])
+        self.assertEqual(duplicates("--at-most", "2k"), ["small/a2"])
+        self.assertEqual(duplicates("--at-most", "5KB", "--at-least", "1000"),
+                         ["mid/b2", "small/a2"])
+        self.assertEqual(duplicates("--at-least", "5000", "--at-most", "5000"),
+                         ["mid/b2"])
+        self.assertEqual(duplicates("--at-least", "2MiB"), ["big/c2"])
+        self.assertEqual(duplicates("--at-least", "2.5M"), ["big/c2"])
+
+    def test_invalid_size_options_are_rejected(self):
+        self.make_file("a")
+        for arguments in (("--at-least", "abc"), ("--at-most", "10q"),
+                          ("--at-least", "0x10"), ("--at-least", "1e3"),
+                          ("--at-most", "-5"), ("--at-most", "99999P"),
+                          ("--at-least", "5k", "--at-most", "1k")):
+            with self.subTest(arguments=arguments):
+                result = self.run_dedup("-nP", *arguments, ".")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("size", result.stderr)
+
     def test_help_and_version_exit_successfully(self):
         for option, expected in [("--help", "usage:"), ("--version", "dedup")]:
             with self.subTest(option=option):

@@ -55,6 +55,9 @@ static char sccsid[] = "@(#)dedup.c)";
 #endif
 
 #include <assert.h>
+#include <ctype.h>
+#include <math.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <err.h>
 #include <errno.h>
@@ -214,7 +217,7 @@ typedef enum ReplaceMode {
 
 typedef struct DedupContext {
     Progress* progress;
-    FileEntryHead* queue;
+    FileEntryHeap* queue;       // Pending work; popping ranks by size mode
     FileEntryHead* raw_queue;
     SigTable* signatures;
     size_t found;
@@ -228,7 +231,8 @@ typedef struct DedupContext {
     size_t total_bytes;  // Accumulated bytes of all scanned files
     size_t queued_count; // Entries in raw_queue + work_queue combined
     uint64_t next_file_sequence;
-    uint64_t next_visit_sequence;
+    uint64_t next_visit_ticket;   // Next ticket to hand out on pop (queue_mutex)
+    uint64_t next_visit_sequence; // Ticket whose turn it is to visit
     uint8_t scan_done;
     uint8_t prune_done;
     uint8_t thread_count;
@@ -553,7 +557,7 @@ void visit_entry(FileEntry* fe, Progress* p, DedupContext* ctx) {
     }
 
     FileSignature* sig = compute_signature(fe->path, fe->device, fe->size);
-    visit_order_begin(ctx, fe->sequence);
+    visit_order_begin(ctx, fe->ticket);
     if (!sig) {
         report_error(ctx, fe->path, "cannot read file signature", errno ? errno : EIO);
         visit_order_end(ctx);
@@ -777,12 +781,8 @@ static bool prune_entry(FileEntry* fe, SeenSet* seen_inodes, SeenSet* seen_clone
         return false;
     }
 
-    // A pruned entry never reaches visit_entry, so its sequence number would
-    // never be advanced by visit_order_end. A worker waiting on
-    // visit_order_begin would block forever and deadlock the whole run, so
-    // advance it here instead.
-    visit_order_begin(c, fe->sequence);
-    visit_order_end(c);
+    // A pruned entry never reaches the work queue, so it holds no visit
+    // ticket: tickets are handed out only when a worker pops an entry.
 
     pthread_mutex_lock(&c->metrics_mutex);
     c->already_saved += fe->size;
@@ -833,7 +833,13 @@ void* prune_work(void* ctx) {
         // once queued, a worker may take and free the entry.
         display_status(c, fe->path);
         SYNC(c->queue_mutex, {
-            file_entry_queue_push(c->queue, fe);
+            if (!file_entry_heap_push(c->queue, fe)) {
+                report_error(c, fe->path, "cannot queue file", ENOMEM);
+                pthread_mutex_lock(&c->metrics_mutex);
+                c->queued_count--;
+                pthread_mutex_unlock(&c->metrics_mutex);
+                file_entry_free(fe);
+            }
         });
     }
 
@@ -847,7 +853,8 @@ void* dedup_work(void* ctx) {
     for (;;) {
         __block FileEntry* fe;
         SYNC(c->queue_mutex, {
-            fe = file_entry_next(c->queue);
+            fe = file_entry_heap_pop(c->queue);
+            if (fe) fe->ticket = c->next_visit_ticket++;
         });
 
         if (!fe) {
@@ -858,7 +865,8 @@ void* dedup_work(void* ctx) {
                 // Publishing prune_done follows the final queue insertion.
                 // Recheck in case that insertion raced with our empty read.
                 SYNC(c->queue_mutex, {
-                    fe = file_entry_next(c->queue);
+                    fe = file_entry_heap_pop(c->queue);
+                    if (fe) fe->ticket = c->next_visit_ticket++;
                 });
                 if (!fe) break;
             }
@@ -1073,7 +1081,7 @@ __attribute__((noreturn))
 static void usage(char* pgm, DedupContext* ctx, int status) {
     FILE* stream = (status == EXIT_SUCCESS) ? stdout : stderr;
     fprintf(stream,
-            "%s\nusage: %s [-t n] [-PVhlmnsvxC] [-d n] [-F format] [-S file] [file ...]\n\n"
+            "%s\nusage: %s [-t n] [-PVhlmnsvxC] [-d n] [-F format] [-S file]\n       [--at-least size] [--at-most size] [file ...]\n\n"
                 "Options:\n"
                 // "  --ignore, -I pattern     Exclude a pattern from being used as a clone\n"
                 // "                           source or being replaced by a clone. This option\n"
@@ -1081,6 +1089,10 @@ static void usage(char* pgm, DedupContext* ctx, int status) {
                 "  --dry-run, -n            Don't replace file content; just print what \n"
                 "                           would have happened.\n"
                 "  --depth, -d depth        Don't descend further than the specified depth.\n"
+                "  --at-least size          Only consider files at least this big. Sizes take\n"
+                "                           a unit: 64k, 1.5M, 2G (powers of 1000) or\n"
+                "                           64KiB, 2GiB (powers of 1024).\n"
+                "  --at-most size           Only consider files at most this big.\n"
                 "  --format, -F format      Output format for byte sizes. Use '-F help' to\n"
                 "                           list the formats.\n"
                 "  --one-file-system, -x    Don't evaluate directories on a different device\n"
@@ -1119,6 +1131,48 @@ static unsigned long parse_count(const char* value, unsigned long maximum,
              label, maximum, value);
     }
     return result;
+}
+
+// Parse a byte count such as 4096, 64k, 1.5M or 2GiB. A bare unit letter or
+// one followed by B is a power of 1000 (matching the default SI output); a
+// following iB makes it a power of 1024. Units are case-insensitive.
+static off_t parse_size(const char* value, const char* label) {
+    const char* bad = "%s must be a byte count such as 4096, 64k, 1.5M or 2GiB: %s";
+    if (!value[0] || !isdigit((unsigned char) value[0])) {
+        errx(EXIT_FAILURE, bad, label, value);
+    }
+    char* end = NULL;
+    errno = 0;
+    long double number = strtold(value, &end);
+    // Only plain digits with an optional fraction: no hex, exponent, inf, nan.
+    if (errno == ERANGE || end != value + strspn(value, "0123456789.") ||
+        !isfinite(number)) {
+        errx(EXIT_FAILURE, bad, label, value);
+    }
+
+    long double scale = 1;
+    if (*end) {
+        static const char units[] = "kmgtp";
+        const char* unit = strchr(units, tolower((unsigned char) *end));
+        if (!unit) {
+            if (strcasecmp(end, "b") != 0) errx(EXIT_FAILURE, bad, label, value);
+        } else {
+            const char* rest = end + 1;
+            long double base = 1000;
+            if (strcasecmp(rest, "ib") == 0) {
+                base = 1024;
+            } else if (*rest && strcasecmp(rest, "b") != 0) {
+                errx(EXIT_FAILURE, bad, label, value);
+            }
+            for (int i = 0; i <= unit - units; i++) scale *= base;
+        }
+    }
+
+    long double bytes = number * scale;
+    if (bytes >= (long double) INT64_MAX) {
+        errx(EXIT_FAILURE, "%s is too large: %s", label, value);
+    }
+    return (off_t) bytes;
 }
 
 __attribute__((const))
@@ -1201,10 +1255,10 @@ bool are_acls_supported(char* path) {
 #endif
 }
 
-// Sibling order within each directory, chosen by the name the program was
-// started as (see order_from_program_name). The traversal stays depth-first;
-// only the order in which siblings are visited changes. Not the default.
-static int sibling_size_order = 0;    // 1: largest first, -1: smallest first
+// Work order, chosen by the name the program was started as. The scan stays
+// depth-first by name; this ranks the files found so far that are waiting for
+// a worker (see FileEntryHeap), not the neighbours in one directory. Not the
+// default.
 
 static int order_from_program_name(const char* argv0) {
     const char* slash = argv0 ? strrchr(argv0, '/') : NULL;
@@ -1221,15 +1275,6 @@ static int traversal_order(const FTSENT** a, const FTSENT** b) {
     nlink_t b_links = ((*b)->fts_info == FTS_F) ? (*b)->fts_statp->st_nlink : 0;
     if (a_links != b_links) return a_links > b_links ? -1 : 1;
 
-    // Only regular files carry a size key, so directories (links == 0 above)
-    // compare equal here and keep a total order by name.
-    if (sibling_size_order != 0) {
-        off_t a_size = ((*a)->fts_info == FTS_F) ? (*a)->fts_statp->st_size : 0;
-        off_t b_size = ((*b)->fts_info == FTS_F) ? (*b)->fts_statp->st_size : 0;
-        if (a_size != b_size) {
-            return (a_size > b_size) == (sibling_size_order > 0) ? -1 : 1;
-        }
-    }
     return strcmp((*a)->fts_name, (*b)->fts_name);
 }
 
@@ -1258,13 +1303,13 @@ static char* canonical_input_path(const char* path) {
 }
 
 int main(int argc, char* argv[]) {
-    sibling_size_order = order_from_program_name(argv[0]);
-
-    FileEntryHead* queue = new_file_entry_queue();
+    FileEntryHeap* queue = new_file_entry_heap(order_from_program_name(argv[0]));
     FileEntryHead* raw_queue = new_file_entry_queue();
     Progress p = { 0 };
     uint16_t max_depth = UINT16_MAX;
     int user_fts_options = 0;
+    off_t min_size = 0;
+    off_t max_size = INT64_MAX;
 
     __block DedupContext dc = {
         .progress = &p,
@@ -1278,6 +1323,7 @@ int main(int argc, char* argv[]) {
         .total_bytes = 0,
         .queued_count = 0,
         .next_file_sequence = 0,
+        .next_visit_ticket = 0,
         .next_visit_sequence = 0,
         .scan_done = 0,
         .prune_done = 0,
@@ -1330,6 +1376,8 @@ int main(int argc, char* argv[]) {
         { "no-clone-conversion", no_argument,   NULL, 'C' },
         { "summary",         required_argument, NULL, 'S' },
         { "help",            no_argument,       NULL, 256 },
+        { "at-least",        required_argument, NULL, 257 },
+        { "at-most",        required_argument, NULL, 258 },
         { NULL, 0, NULL, 0 },
     };
 
@@ -1389,6 +1437,12 @@ int main(int argc, char* argv[]) {
             case 'S':
                 dc.summary_file = optarg;
                 break;
+            case 257:
+                min_size = parse_size(optarg, "Minimum size");
+                break;
+            case 258:
+                max_size = parse_size(optarg, "Maximum size");
+                break;
             case 256:
                 usage(argv[0], &dc, EXIT_SUCCESS);
             case '?':
@@ -1402,6 +1456,10 @@ int main(int argc, char* argv[]) {
     }
     argc -= optind;
     argv += optind;
+
+    if (min_size > max_size) {
+        errx(EXIT_FAILURE, "Minimum size is larger than maximum size");
+    }
 
     if (!isatty(STDERR_FILENO)) {
         dc.progress = NULL;
@@ -1599,6 +1657,11 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
+        // outside the requested size window; only filters, never reorders
+        if (entry->fts_statp->st_size < min_size || entry->fts_statp->st_size > max_size) {
+            continue;
+        }
+
         // the file looks like a previously failed clone
         if (strncmp(entry->fts_name, ".~.", 3) == 0) {
             continue;
@@ -1670,7 +1733,11 @@ int main(int argc, char* argv[]) {
                 file_entry_free(fe);
             } else {
                 // Survivor goes to work_queue (already counted in queued_count)
-                file_entry_queue_push(queue, fe);
+                if (!file_entry_heap_push(queue, fe)) {
+                    report_error(&dc, fe->path, "cannot queue file", ENOMEM);
+                    file_entry_free(fe);
+                    continue;
+                }
                 dedup_work(&dc);
             }
         } else {
@@ -1727,7 +1794,7 @@ int main(int argc, char* argv[]) {
     free_seen_set(st_seen_inodes);
     free_seen_set(st_seen_clones);
     free_file_entry_queue(raw_queue); raw_queue = NULL;
-    free_file_entry_queue(queue); queue = NULL;
+    free_file_entry_heap(queue); queue = NULL;
     free_sig_table(dc.signatures, NULL); dc.signatures = NULL;
 
     if (dc.progress) {

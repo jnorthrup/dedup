@@ -357,8 +357,14 @@ START_TEST(dedup_keeps_existing_clones) {
     ck_assert_uint_eq(family, get_clone_id("test-data/clonefile/clone-family/bar2"));
 } END_TEST
 
-// dedup-large-dfs and dedup-small-dfs are symlinks to dedup that visit the
-// siblings in a directory largest or smallest first. Plain dedup keeps name order.
+// dedup-large-dfs and dedup-small-dfs are symlinks to dedup that rank the files
+// found so far and waiting for a worker; the ranking itself is tested on the
+// queue (queue_suite.c), whose result depends on how far the scan is ahead.
+// Size ordering changes when each duplicate set is reached, never which file is
+// the origin: two identical files have equal sizes, so their relative order is
+// still decided by hard-link count, then name, then directory order. Build a tree
+// where a deep copy precedes a shallow one and a hard-linked group follows a
+// single-link copy, and require the same origin for every replacement.
 static void sibling_order_write(const char* dir, const char* name, char fill, size_t size) {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
@@ -372,79 +378,6 @@ static void sibling_order_write(const char* dir, const char* name, char fill, si
     free(data);
 }
 
-static void sibling_order_check(const char* program, const char* expected) {
-    char dir[] = "/tmp/dedup-order-XXXXXX";
-    ck_assert_ptr_nonnull(mkdtemp(dir));
-    const char* names[] = { "a1", "a2", "b1", "b2", "c1", "c2" };
-    sibling_order_write(dir, "a1", 'a', 100);
-    sibling_order_write(dir, "a2", 'a', 100);
-    sibling_order_write(dir, "b1", 'b', 5000);
-    sibling_order_write(dir, "b2", 'b', 5000);
-    sibling_order_write(dir, "c1", 'c', 1000);
-    sibling_order_write(dir, "c2", 'c', 1000);
-
-    char binary[PATH_MAX], link[PATH_MAX];
-    ck_assert_ptr_nonnull(realpath(DEDUP_TEST_BINARY, binary));
-    snprintf(link, sizeof(link), "%s/%s", dir, program);
-    ck_assert_int_eq(symlink(binary, link), 0);
-
-    // The program link lives beside the data, so scan a subdirectory.
-    char data[PATH_MAX];
-    snprintf(data, sizeof(data), "%s/data", dir);
-    ck_assert_int_eq(mkdir(data, 0700), 0);
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        char from[PATH_MAX], to[PATH_MAX];
-        snprintf(from, sizeof(from), "%s/%s", dir, names[i]);
-        snprintf(to, sizeof(to), "%s/%s", data, names[i]);
-        ck_assert_int_eq(rename(from, to), 0);
-    }
-
-    char command[2 * PATH_MAX];
-    snprintf(command, sizeof(command), "\"%s\" -nvP \"%s\"", link, data);
-    char* output = run(command);
-    ck_assert_ptr_nonnull(output);
-
-    // Which duplicates would be replaced, in the order they were visited.
-    char seen[16] = { 0 };
-    for (const char* line = output; (line = strstr(line, "would deduplicate ")); line += 1) {
-        const char* end = strstr(line, " to ");
-        ck_assert_ptr_nonnull(end);
-        const char* slash = end;
-        while (slash > line && *slash != '/') slash--;
-        ck_assert_int_eq(*slash, '/');
-        ck_assert_uint_lt(strlen(seen), sizeof(seen) - 1);
-        seen[strlen(seen)] = slash[1];
-    }
-    ck_assert_str_eq(seen, expected);
-    free(output);
-
-    unlink(link);
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        char path[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", data, names[i]);
-        unlink(path);
-    }
-    rmdir(data);
-    rmdir(dir);
-}
-
-START_TEST(dedup_default_visits_siblings_by_name) {
-    sibling_order_check("dedup", "abc");
-} END_TEST
-
-START_TEST(dedup_large_dfs_visits_largest_siblings_first) {
-    sibling_order_check("dedup-large-dfs", "bca");
-} END_TEST
-
-START_TEST(dedup_small_dfs_visits_smallest_siblings_first) {
-    sibling_order_check("dedup-small-dfs", "acb");
-} END_TEST
-
-// Size ordering changes when each duplicate set is reached, never which file is
-// the origin: two identical files have equal sizes, so their relative order is
-// still decided by hard-link count, then name, then directory order. Build a tree
-// where a deep copy precedes a shallow one and a hard-linked group follows a
-// single-link copy, and require the same origin for every replacement.
 static void ordering_mkdirs(const char* path) {
     char partial[PATH_MAX];
     snprintf(partial, sizeof(partial), "%s", path);
@@ -555,9 +488,6 @@ Suite* dedup_suite() {
     tcase_add_test(tc, dedup_preserve_mtime);
     tcase_add_test(tc, dedup_do_not_preserve_mtime);
     tcase_add_test(tc, dedup_preserve_mtime_relative_cwd);
-    tcase_add_test(tc, dedup_default_visits_siblings_by_name);
-    tcase_add_test(tc, dedup_large_dfs_visits_largest_siblings_first);
-    tcase_add_test(tc, dedup_small_dfs_visits_smallest_siblings_first);
     tcase_add_test(tc, dedup_size_order_keeps_the_same_origin);
     // tcase_add_test(tc, dedup_parent_mtime_immutable);
     tcase_add_test(tc, dedup_failed_replacement_exit_status);

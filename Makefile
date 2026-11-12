@@ -215,9 +215,13 @@ report-coverage:
 
 PREFIX ?= /usr/local
 
+# argv[0] aliases that select sibling visit order (see dedup.c).
+DFS_ALIASES = dedup-large-dfs dedup-small-dfs
+
 install: dedup mkdirs
 	install dedup $(PREFIX)/bin
 	install dedup.1 $(PREFIX)/share/man/man1
+	for a in $(DFS_ALIASES); do ln -sf dedup $(PREFIX)/bin/$$a; done
 
 build/dist mkdirs:
 	mkdir -p $(PREFIX)/bin
@@ -226,19 +230,21 @@ build/dist mkdirs:
 dist: PREFIX=build/dist
 dist: check-spelling universal-dedup build/dist install
 	cd build/dist; tar -Jcvf dedup-$(VERSION).tar.xz bin share
-	cd build/dist; zip -r dedup-$(VERSION).zip bin share
+	cd build/dist; zip -r -y dedup-$(VERSION).zip bin share
 
 dist-verify: check dist
 	mkdir -p build/dist-check
 	cd build/dist-check && tar xvJf ../dist/dedup-$(VERSION).tar.xz
 	cd build/dist-check && test -x bin/dedup
 	cd build/dist-check && test -f share/man/man1/dedup.1
+	cd build/dist-check && for a in $(DFS_ALIASES); do test "$$(readlink bin/$$a)" = dedup || exit 1; done
 	cd build/dist-check && file bin/dedup | grep -q 'Mach-O universal'
 	cd build/dist-check && file bin/dedup | grep -q '(for architecture x86_64)'
 	cd build/dist-check && file bin/dedup | grep -q '(for architecture arm64)'
 
 uninstall:
 	rm $(PREFIX)/bin/dedup
+	cd $(PREFIX)/bin && rm -f $(DFS_ALIASES)
 	rm $(PREFIX)/share/man/man1/dedup.1
 
 distcheck: PREFIX=build/dist-check

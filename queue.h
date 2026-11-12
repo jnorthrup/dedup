@@ -43,7 +43,8 @@ typedef struct FileEntry {
     nlink_t nlink;
     uint32_t flags;
     size_t size;
-    uint64_t sequence;
+    uint64_t sequence;      /* discovery order; tie-break for the heap */
+    uint64_t ticket;        /* visit turn, assigned when popped for a worker */
     bool acls_supported;
     short level;
     STAILQ_ENTRY(FileEntry) entries;    /* Tail queue. */
@@ -64,5 +65,22 @@ void file_entry_queue_append(FileEntryHead* queue,
 void file_entry_queue_push(FileEntryHead* queue, FileEntry* fe);
 FileEntry* file_entry_next(FileEntryHead* queue);
 void file_entry_free(FileEntry* fe);
+
+/// The work queue: entries found and waiting for a worker. `pop` returns the
+/// best entry among those pending right now; later finds can still outrank
+/// the rest. `size_order` 0 pops in discovery order, > 0 the largest first,
+/// < 0 the smallest first. Equal sizes fall back to discovery order, so two
+/// identical files are always popped in the order they were found, as in the
+/// default order. That keeps the same file as the source in every mode.
+/// Hard-link-first order stays a property of the scan, not of this ranking.
+typedef struct FileEntryHeap FileEntryHeap;
+
+FileEntryHeap* new_file_entry_heap(int size_order);
+/// Frees the heap and any entries still in it.
+void free_file_entry_heap(FileEntryHeap* heap);
+/// Returns false, leaving `fe` with the caller, if memory ran out.
+bool file_entry_heap_push(FileEntryHeap* heap, FileEntry* fe);
+FileEntry* file_entry_heap_pop(FileEntryHeap* heap);
+size_t file_entry_heap_count(const FileEntryHeap* heap);
 
 #endif // __DEDUP_QUEUE_H__

@@ -29,8 +29,8 @@ TEST_LDFLAGS = -L/opt/homebrew/lib $(LDFLAGS)
 DEDUP_TEST_BINARY ?= $(abspath ../dedup)
 shquote = '$(subst ','"'"',$(1))'
 TEST_CPPFLAGS = $(CPPFLAGS) $(call shquote,-DDEDUP_TEST_BINARY="$(DEDUP_TEST_BINARY)")
-SUPPORT_OBJECTS = runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o
-SUITE_OBJECTS = dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o test_utils.o
+SUPPORT_OBJECTS = runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o queue_test.o
+SUITE_OBJECTS = dedup_check.o dedup_suite.o dedup_link_suite.o dedup_symlink_suite.o clone_suite.o signature_suite.o runtime_dispatch_suite.o queue_suite.o test_utils.o
 TEST_OBJECTS = $(SUITE_OBJECTS) $(SUPPORT_OBJECTS) output_format_test.o output_format_support.o seen_set_test.o
 
 # Invalidate test objects when their compiler flags or selected CLI change.
@@ -54,8 +54,8 @@ else
 # Strict -std=c2x hides POSIX from glibc's headers (mkdtemp, PATH_MAX).
 COMMON_CFLAGS += -D_DEFAULT_SOURCE
 # The suites that need neither APFS nor disk images.
-SUPPORT_OBJECTS = runtime_caps_test.o runtime_dispatch_test.o signature_test.o sig_table_test.o extent_map_test.o
-SUITE_OBJECTS = dedup_check.o signature_suite.o runtime_dispatch_suite.o extent_map_suite.o seen_set_suite.o seen_set_support.o test_utils.o
+SUPPORT_OBJECTS = runtime_caps_test.o runtime_dispatch_test.o signature_test.o sig_table_test.o extent_map_test.o queue_test.o
+SUITE_OBJECTS = dedup_check.o signature_suite.o runtime_dispatch_suite.o extent_map_suite.o seen_set_suite.o seen_set_support.o queue_suite.o test_utils.o
 CHECK_LIBS = $(shell pkg-config --libs check 2>/dev/null || echo -lcheck)
 endif
 
@@ -284,4 +284,4 @@ clean: clean-all-test-data
 	rm -f *.o *.d .build-config
 	rm -rf *.dSYM/
 	rm -f dedup_check output_format_check seen_set_check
-	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o extent_map_test.o seen_set_support.o
+	rm -f runtime_caps_test.o runtime_dispatch_test.o alist_test.o clone_test.o map_test.o utils_test.o signature_test.o sig_table_test.o extent_map_test.o queue_test.o queue_suite.o seen_set_support.o

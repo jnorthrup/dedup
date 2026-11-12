@@ -87,3 +87,75 @@ void file_entry_free(FileEntry* fe) {
     free(fe->path);
     free(fe);
 }
+
+struct FileEntryHeap {
+    FileEntry** items;
+    size_t count;
+    size_t capacity;
+    int size_order;
+};
+
+FileEntryHeap* new_file_entry_heap(int size_order) {
+    FileEntryHeap* heap = calloc(1, sizeof(FileEntryHeap));
+    if (heap) heap->size_order = size_order;
+    return heap;
+}
+
+void free_file_entry_heap(FileEntryHeap* heap) {
+    if (!heap) return;
+    for (size_t i = 0; i < heap->count; i++) file_entry_free(heap->items[i]);
+    free(heap->items);
+    free(heap);
+}
+
+// True when `a` should be popped before `b`.
+static bool heap_before(const FileEntryHeap* heap, const FileEntry* a, const FileEntry* b) {
+    if (heap->size_order != 0) {
+        if (a->size != b->size) return (a->size > b->size) == (heap->size_order > 0);
+    }
+    return a->sequence < b->sequence;
+}
+
+bool file_entry_heap_push(FileEntryHeap* heap, FileEntry* fe) {
+    if (!heap || !fe) return false;
+    if (heap->count == heap->capacity) {
+        size_t capacity = heap->capacity ? heap->capacity * 2 : 1024;
+        FileEntry** items = realloc(heap->items, capacity * sizeof(FileEntry*));
+        if (!items) return false;
+        heap->items = items;
+        heap->capacity = capacity;
+    }
+    size_t i = heap->count++;
+    while (i > 0) {
+        size_t parent = (i - 1) / 2;
+        if (!heap_before(heap, fe, heap->items[parent])) break;
+        heap->items[i] = heap->items[parent];
+        i = parent;
+    }
+    heap->items[i] = fe;
+    return true;
+}
+
+FileEntry* file_entry_heap_pop(FileEntryHeap* heap) {
+    if (!heap || heap->count == 0) return NULL;
+    FileEntry* top = heap->items[0];
+    FileEntry* last = heap->items[--heap->count];
+    size_t i = 0;
+    for (;;) {
+        size_t child = 2 * i + 1;
+        if (child >= heap->count) break;
+        if (child + 1 < heap->count &&
+            heap_before(heap, heap->items[child + 1], heap->items[child])) {
+            child++;
+        }
+        if (!heap_before(heap, heap->items[child], last)) break;
+        heap->items[i] = heap->items[child];
+        i = child;
+    }
+    if (heap->count > 0) heap->items[i] = last;
+    return top;
+}
+
+size_t file_entry_heap_count(const FileEntryHeap* heap) {
+    return heap ? heap->count : 0;
+}
